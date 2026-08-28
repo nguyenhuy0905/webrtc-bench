@@ -1,0 +1,9 @@
+/**.pem
+/**.pub
+# I dunno the suffix for private key, so,
+/target/**
+# user database for turnserver
+/**.sql
+/**.priv
+# the one name I specifically used for a private key
+/turn_key
