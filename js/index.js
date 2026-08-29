@@ -1,10 +1,9 @@
 const iceCfg = {
   iceServers: [
     {
-      urls: "stun:stun.l.google.com:19302",
-      // urls: "turn:127.0.0.1:6969",
-      // username: "lenin",
-      // credential: "lenin420"
+      urls: "turn:localhost:6969?transport=udp",
+      username: "stalin",
+      credential: "stalin420"
     }
   ]
 }
