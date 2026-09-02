@@ -7,3 +7,7 @@
 /**.priv
 # the one name I specifically used for a private key
 /turn_key
+# :mksession
+/**.vim
+# ctags
+/tags
