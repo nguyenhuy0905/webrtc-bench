@@ -55,17 +55,9 @@ impl PeerConnectionEventHandler for BroadcastHandler {
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    let mut args: Vec<_> = std::env::args().collect();
-    assert!(args.len() == 3);
-    // a bit lazy, but,
-    let username = std::mem::take(&mut args[1]);
-    let credential = std::mem::take(&mut args[2]);
-
     let local_config = RTCConfigurationBuilder::default()
         .with_ice_servers(vec![RTCIceServer {
-            urls: vec!["turn:127.0.0.1:6969?transport=udp".into()],
-            username,
-            credential,
+            urls: vec!["stun:127.0.0.1:3478".into()],
         }])
         .build();
 
