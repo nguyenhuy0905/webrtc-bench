@@ -1,8 +1,17 @@
 # WebRTC benchmark
+## Preface
+- Really, [the webrtc.rs repo](https://github.com/webrtc-rs/webrtc) has most of
+what we need as examples. So, I'll refer to the examples quite a bit in here.
+
+### Useful examples
+- [Stream video and audio from disk](https://github.com/webrtc-rs/webrtc/tree/master/examples/play-from-disk-h26x).
+- [Getting the stats](https://github.com/webrtc-rs/webrtc/tree/master/examples/stats). This does include RTT.
+- [Broadcasting](https://github.com/webrtc-rs/webrtc/tree/master/examples/broadcast).
+
 ## Architecture?
-- Assume peers can discover each other, for now.
-- General idea; peers can send videos between each other.
-    - Latency of a peer is the average of latency of contents received from all other peers.
+- I'm thinking of, all peers join one broadcast channel, and throw videos to one another.
+- Then we get RTT.
+- I wonder how we'd go about doing subjective quality tests though.
 
 ## Setup
 - We use this thing called [coturn](https://github.com/coturn/coturn) for the TURN and STUN servers.
@@ -26,12 +35,6 @@ turnadmin -b test_user_db.sql -a -u lenin -r soviet.russia -p lenin420
 turnserver -b test_user_db.sql -a --cert turn_cert.pem --pkey turn_key -p 6969 -L 127.0.0.1 -r soviet.russia
 # in another terminal, launch a web server
 python3 -m http.server
-# now go to localhost:8000/js
-# copy the code in the first box. Let's call this $BROWSER_SDP_BASE64
-# in yet another terminal,
-echo $BROWSER_SDP_BASE64 | cargo run
-# ...currently, it errs out before it generates a answer SDP...
-# ...but once it's fixed, all you'd need to do is copy the code the program generates in the 2nd box. Then "Start Session".
 ```
 
 - To see how it *should* work, toy with one of the data channel examples in [the webrtc.rs repo](https://github.com/webrtc-rs/webrtc/tree/master).
@@ -46,3 +49,7 @@ echo $BROWSER_SDP_BASE64 | cargo run
     credential: "lenin420" // or "stalin420"
 }
 ```
+
+### How do we stream videos?
+- FFmpeg or GStreamer can stream a single channel as RTP (consult [the FFmpeg
+example here](https://trac.ffmpeg.org/wiki/StreamingGuide)).
