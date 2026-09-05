@@ -6,9 +6,10 @@ what we need as examples. So, I'll refer to the examples quite a bit in here.
 ### Useful examples
 - [Stream video and audio from disk](https://github.com/webrtc-rs/webrtc/tree/master/examples/play-from-disk-h26x).
 - [Getting the stats](https://github.com/webrtc-rs/webrtc/tree/master/examples/stats). This does include RTT.
-- [Broadcasting](https://github.com/webrtc-rs/webrtc/tree/master/examples/broadcast).
+- [Broadcasting](https://github.com/webrtc-rs/webrtc/tree/master/examples/broadcast). Do note this is a star topology.
 
 ## Architecture?
+- [The Excalidraw of how I plan to set up](https://excalidraw.com/#json=UqrxBjltDgnpfdRbsdIhh,iWbbKnik0c_q24VdLUTs4g).
 - I'm thinking of, all peers join one broadcast channel, and throw videos to one another.
 - Then we get RTT.
 - I wonder how we'd go about doing subjective quality tests though.
@@ -49,6 +50,9 @@ python3 -m http.server
     credential: "lenin420" // or "stalin420"
 }
 ```
+
+### Throwing SDPs around
+- ...
 
 ### How do we stream videos?
 - FFmpeg or GStreamer can stream a single channel as RTP (consult [the FFmpeg

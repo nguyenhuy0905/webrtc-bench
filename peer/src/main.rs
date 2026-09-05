@@ -58,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
     let local_config = RTCConfigurationBuilder::default()
         .with_ice_servers(vec![RTCIceServer {
             urls: vec!["stun:127.0.0.1:3478".into()],
+            ..Default::default()
         }])
         .build();
 
