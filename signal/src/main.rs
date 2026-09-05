@@ -14,7 +14,8 @@ use webrtc::peer_connection::RTCSessionDescription;
 // or when a new peer join.
 
 // TODO for this file in particular:
-// - [ ] For POST /channel, peer sends their SDP offer, and server will:
+// - [ ] For POST /channel, peer sends channel name and SDP offer, and server
+// will:
 //  1. Check if a channel with the same name already exists; if yes, return a
 //  FORBIDDEN (and probably some JSON saying the channel already exists, but we
 //  probably don't need that for now). If no, return a CREATED, create a new
