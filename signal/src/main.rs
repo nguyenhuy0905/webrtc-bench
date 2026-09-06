@@ -1,9 +1,10 @@
+//! Signaling server.
 #![allow(unused)]
 use bytes::Bytes;
 use clap::Parser;
 use dashmap::{DashMap, DashSet};
-use http_body_util::Full;
-use hyper::{Error, Method, Request, Response, StatusCode, body, server::conn::http1};
+use matchbox_signaling::SignalingServer;
+use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, net::SocketAddr, sync::LazyLock};
 use tokio::{net::TcpListener, sync::broadcast, task};
 use webrtc::peer_connection::RTCSessionDescription;
@@ -13,19 +14,8 @@ use webrtc::peer_connection::RTCSessionDescription;
 // notifications (in the form of SDP offers) when they first join the channel,
 // or when a new peer join.
 
-// TODO for this file in particular:
-// - [ ] For POST /channel, peer sends channel name and SDP offer, and server
-// will:
-//  1. Check if a channel with the same name already exists; if yes, return a
-//  FORBIDDEN (and probably some JSON saying the channel already exists, but we
-//  probably don't need that for now). If no, return a CREATED, create a new
-//  channel under that name, add the SDP offer into the channel data's offers,
-//  subscribe the peer to the broadcast channel (in some way, probably by
-//  sending the peer an offer for a WebRTC DataChannel).
-//  - [ ] For GET /channel, if channel doesn't exist, send an empty OK back.
-//  Else send an OK with the JSON array representing *all* the SDP offers
-//  currently stored.
-//  - [ ] Anything else? Not sure...
+// `on_connection_request` is where we handle most of the logic, since that's where we know about
+// the HTTP request and its content.
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about=None)]
@@ -47,35 +37,24 @@ async fn main() -> Result<(), String> {
             return Err(format!("Cannot bind to {}:{}: {e}", args.addr, args.port));
         }
     };
-    let listener = match TcpListener::bind(addr).await {
-        Ok(listener) => listener,
-        Err(e) => {
-            return Err(format!("Cannot bind to {addr}: {e}"));
-        }
-    };
-    match listener.local_addr() {
-        Ok(local_addr) => log::info!("Listening on http://{}", local_addr),
-        Err(e) => {
-            return Err(format!("Error getting server address: {e}"));
-        }
+    let mut server = SignalingServer::client_server_builder(addr)
+        .on_connection_request(|connection| {
+            log::info!("Connecting: {connection:?}");
+            Ok(true) // Allow all connections
+        })
+        .on_id_assignment(|(socket, id)| log::info!("{socket} received {id}"))
+        .on_host_connected(|id| log::info!("Host joined: {id}"))
+        .on_host_disconnected(|id| log::info!("Host left: {id}"))
+        .on_client_connected(|id| log::info!("Client joined: {id}"))
+        .on_client_disconnected(|id| log::info!("Client left: {id}"))
+        .trace()
+        .build();
+    match server.bind() {
+        Ok(sock_addr) => log::info!("Listening on ws://{sock_addr}"),
+        Err(e) => return Err(format!("{e}")),
     }
 
-    loop {
-        let (stream, _) = match listener.accept().await {
-            Ok((stream, client_addr)) => {
-                log::info!("New client: {client_addr}");
-                (stream, client_addr)
-            }
-            Err(e) => {
-                log::error!("Client accept failed: {e}");
-                continue;
-            }
-        };
-
-        task::spawn(async move {});
-    }
-
-    Ok(())
+    server.serve().await.map_err(|e| format!("{e}"))
 }
 
 /// All the info needed to help peers establish PeerConnections, hopefully.
@@ -89,18 +68,3 @@ struct ChannelData {
 }
 
 static CHANNELS: LazyLock<DashMap<String, ChannelData>> = LazyLock::new(|| Default::default());
-
-/// Responses:
-/// - GET "/channel" -> JSON representing the offer, or something like "nah
-/// channel doesn't exist".
-/// - POST "/channel" (with JSON representing the offer) -> OK (aka, channel
-/// has been created), or ERR (channel already exists).
-/// - TODO: add more...
-/// Also, our server is infallible.
-async fn handle_request(req: Request<body::Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
-    match (req.method(), req.uri().path()) {
-        (&Method::GET, "/channel") => todo!("GET /channel"),
-        (&Method::POST, "/channel") => todo!("POST /channel"),
-        _ => todo!("Handle the case of \"this path doesnt' exist\""),
-    }
-}
