@@ -38,10 +38,7 @@ turnserver -b test_user_db.sql -a --cert turn_cert.pem --pkey turn_key -p 6969 -
 python3 -m http.server
 ```
 
-- To see how it *should* work, toy with one of the data channel examples in [the webrtc.rs repo](https://github.com/webrtc-rs/webrtc/tree/master).
-    - I don't have any luck with the Google's STUN server. So, you might need to modify the ICE server it's using... Change on both the jsfiddle of the examples, and the example Rust code.
-    - For STUN, just change `urls` to `stun:localhost:3478`.
-    - If you use the TURN example above:
+- If you use the TURN example above, this is the username and credential:
 
 ```js
 {
@@ -52,8 +49,7 @@ python3 -m http.server
 ```
 
 ### Throwing SDPs around
-- ...
+- Handled by `matchbox` actually...
 
 ### How do we stream videos?
-- FFmpeg or GStreamer can stream a single channel as RTP (consult [the FFmpeg
-example here](https://trac.ffmpeg.org/wiki/StreamingGuide)).
+- The `webrtc` crate has some nice utilities to read from H264 and OPUS files...

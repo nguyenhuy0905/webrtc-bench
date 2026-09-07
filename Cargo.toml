@@ -7,7 +7,7 @@ version = "0.0.1"
 edition = "2024"
 
 [workspace.dependencies]
-webrtc = "0.20"
+webrtc = { version = "0.17", default-features = false }
 tokio = { version = "1", features = ["full"] }
 log = "0.4"
 serde = "1"
@@ -16,6 +16,10 @@ base64 = { version = "0.23", features = ["simd-unsafe"] }
 async-trait = "0.1"
 anyhow = "1"
 matchbox_signaling = "0.14"
+matchbox_socket = "0.14"
+env_logger = "0.11"
+futures = "0.3"
+futures-util = "0.3"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 dashmap = { version = "6.2", features = ["inline"] }
