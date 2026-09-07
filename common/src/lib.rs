@@ -1,3 +1,3 @@
 //! Common types and methods that `peer` and `signal` both use.
 #![allow(unused)]
-// so far, nothing...
+use serde::{Serialize, Deserialize};
