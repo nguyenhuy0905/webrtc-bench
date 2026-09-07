@@ -16,3 +16,4 @@ clap.workspace = true
 dashmap.workspace = true
 common = {path = "../common"}
 tokio-tungstenite.workspace = true
+uuid.workspace = true

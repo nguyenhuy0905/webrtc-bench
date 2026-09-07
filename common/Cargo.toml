@@ -5,3 +5,5 @@ edition.workspace = true
 
 [dependencies]
 serde.workspace = true
+webrtc.workspace = true
+uuid.workspace = true

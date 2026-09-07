@@ -7,12 +7,13 @@ use futures_util::{
     stream::{StreamExt, TryStreamExt},
     SinkExt,
 };
-use std::{net::SocketAddr, sync::LazyLock, pin::Pin};
+use std::{net::SocketAddr, pin::Pin, sync::LazyLock};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::mpsc,
 };
 use tokio_tungstenite::tungstenite::{error::Error as TungsteniteError, protocol::Message};
+use uuid::Uuid;
 
 // Some terms I use a little loosely here:
 // - "channel" is a broadcast. Peers subscribe to the broadcast. They can recv
@@ -45,15 +46,15 @@ async fn main() -> Result<(), String> {
                 Err(e) => match e {
                     TungsteniteError::ConnectionClosed => {
                         log::info!("Connection {addr} closed");
-                        PEERS.remove(&addr);
+                        remove_peer_addr(&addr);
                     }
                     TungsteniteError::AttackAttempt => {
                         log::warn!("Attack attempt detected! Nuking the suspecting peer at once");
-                        PEERS.remove(&addr);
+                        remove_peer_addr(&addr);
                     }
                     _ => {
                         log::warn!("Misc. error: {e}");
-                        PEERS.remove(&addr);
+                        remove_peer_addr(&addr);
                     }
                 },
             }
@@ -74,18 +75,23 @@ async fn handle_connection(
     log::info!("WebSocket connection established for {addr}");
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-    PEERS.insert(addr, tx);
-    let addr = Pin::new(&addr);
+    let mut uuid = Uuid::new_v4();
+    while PEER_UUID_AND_SENDER.get(&uuid).is_some() {
+        uuid = Uuid::new_v4();
+    }
+    PEER_UUID_AND_SENDER.insert(uuid, tx);
+    // PEER_ADDR_AND_SENDER.insert(addr, tx);
+    let uuid = Pin::new(&uuid);
     let (mut outgoing, incoming) = ws_stream.split();
     let broadcast_incoming = incoming.try_for_each_concurrent(4, |msg| {
         log::info!("Recv msg from {addr}: {}", msg.to_text().unwrap());
-        for recp in PEERS
+        for recp in PEER_UUID_AND_SENDER
             .iter()
-            .filter(|kv| kv.key() != &*addr)
+            .filter(|kv| kv.key() != &*uuid)
             .map(|kv| kv.value().clone())
         {
             match recp.send(msg.clone()) {
-                Ok(()) => {},
+                Ok(()) => {}
                 Err(e) => {
                     log::debug!("recp.send ignore: {e}");
                 }
@@ -104,14 +110,24 @@ async fn handle_connection(
 
     tokio::select! {
         _ = broadcast_incoming => {
-            log::info!("Broadcast incoming for {} done", *addr);
+            log::info!("Broadcast incoming for {} done", *uuid);
         }
         _ = recv_from_others => {
-            log::info!("Receiving for others for {} done", *addr);
+            log::info!("Receiving for others for {} done", *uuid);
         }
     };
 
     Ok(())
+}
+
+/// Remove the peer with the specified address.
+fn remove_peer_addr(addr: &SocketAddr) {
+    if let Some(uuid) = PEER_ADDR_AND_UUID.get(&addr) {
+        PEER_UUID_AND_SENDER.remove(&uuid);
+        // drop borrow
+        let uuid = 0;
+        PEER_ADDR_AND_UUID.remove(&addr);
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -122,4 +138,6 @@ struct Opts {
     host: String,
 }
 
-static PEERS: LazyLock<DashMap<SocketAddr, mpsc::UnboundedSender<Message>>> = LazyLock::new(DashMap::new);
+static PEER_UUID_AND_SENDER: LazyLock<DashMap<Uuid, mpsc::UnboundedSender<Message>>> =
+    LazyLock::new(DashMap::new);
+static PEER_ADDR_AND_UUID: LazyLock<DashMap<SocketAddr, Uuid>> = LazyLock::new(DashMap::new);
