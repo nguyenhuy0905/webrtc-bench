@@ -9,8 +9,12 @@
 // I'll make my own WebSocket (building from `tokio-tungstenite`) then
 
 use clap::Parser;
-use tokio::sync::mpsc;
+use dashmap::DashMap;
+use std::sync::LazyLock;
+use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::tungstenite::{error::Error as TungsteniteError, protocol::Message};
+use uuid::Uuid;
+use webrtc::peer_connection::RTCPeerConnection;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about=None)]
@@ -37,3 +41,9 @@ async fn main() -> Result<(), String> {
 
     Ok(())
 }
+
+/// This peer's own UUID. We'll only receive this after asking the signaling server to join.
+static SELF_UUID: LazyLock<RwLock<Option<Uuid>>> = LazyLock::new(|| RwLock::new(None));
+/// We got stuff to send, we send to each of them.
+/// And if one leaves, we remove that one's peer connection.
+static OTHER_PEERS: LazyLock<DashMap<Uuid, RTCPeerConnection>> = LazyLock::new(DashMap::new);

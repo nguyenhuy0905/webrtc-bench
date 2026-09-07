@@ -12,3 +12,5 @@ async-trait.workspace = true
 env_logger.workspace = true
 clap.workspace = true
 tokio-tungstenite.workspace = true
+dashmap.workspace = true
+uuid.workspace = true

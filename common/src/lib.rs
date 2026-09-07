@@ -8,7 +8,7 @@ use uuid::Uuid;
 /// We assume 1 channel only, and each peer only has 1 SDP offer. Hopefully adding more than
 /// 1 channel isn't going to be difficult.
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) enum WsExchangeMsg {
+pub enum WsExchangeMsg {
     /// Request from a peer to join. For now we assume 1 channel only.
     Join {
         offer: RTCSessionDescription,
