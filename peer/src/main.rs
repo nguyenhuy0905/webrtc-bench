@@ -187,6 +187,7 @@ static OTHER_PEERS: LazyLock<DashMap<Uuid, (RTCPeerConnection, PeerSetupStage)>>
 
 enum PeerSetupStage {
     WaitingAnswer,
+    WaitingOffer,
     Done,
 }
 
