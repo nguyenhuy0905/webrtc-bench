@@ -85,41 +85,113 @@ async fn handle_connection(
     PEER_UUID_AND_SENDER.insert(uuid, tx);
     // then send the peer its PeerID.
     let (mut outgoing, incoming) = ws_stream.split();
-    outgoing.send(Message::from(
-        serde_json::to_string(&WsExchangeMsg::JoinPeerId(uuid))
-            .expect("Cannot serialize JoinPeerId to JSON"),
-    )).await;
+    outgoing
+        .send(Message::from(
+            serde_json::to_string(&WsExchangeMsg::JoinPeerId(uuid))
+                .expect("Cannot serialize JoinPeerId to JSON"),
+        ))
+        .await;
+
+    // the current peer receives Peer IDs of all other peers.
+    // All other peers receive the current peer's ID.
+    for kv in PEER_UUID_AND_SENDER.iter().filter(|kv| kv.key() != &uuid) {
+        let msg_to_others = WsExchangeMsg::NewPeer { peer_id: uuid };
+        let msg_to_self = WsExchangeMsg::ExistingPeer { peer_id: *kv.key() };
+
+        let send_to_self = match serde_json::to_string(&msg_to_self) {
+            Ok(ret) => ret,
+            Err(e) => {
+                log::error!("Cannot serialize message {msg_to_self:?}: {e}");
+                // TODO: we should retry, but the current peer and this peer cannot make
+                // a PeerConnection for now.
+                continue;
+            }
+        };
+
+        match outgoing.send(Message::from(send_to_self)).await {
+            Ok(()) => {}
+            Err(e) => {
+                log::warn!("Cannot send {uuid} its UUID: {e}");
+                // TODO: we shouldn't just log and do nothing else for this error.
+                continue;
+            }
+        }
+        match kv.value().send(msg_to_others) {
+            Ok(()) => {}
+            Err(e) => {
+                log::warn!("Cannot send {uuid} to {}: {e}", kv.key());
+                // TODO: we shouldn't just log and do nothing else for this error.
+            }
+        }
+    }
 
     let uuid = Pin::new(&uuid);
     let broadcast_incoming = incoming.try_for_each_concurrent(4, |msg| {
         log::info!("Recv msg from {}: {}", *uuid, msg.to_text().unwrap());
-        for recp in PEER_UUID_AND_SENDER
-            .iter()
-            .filter(|kv| kv.key() != &*uuid)
-            .map(|kv| kv.value().clone())
-        {
-            // make sure the message is valid before broadcasting...
-            let msg: WsExchangeMsg = match serde_json::from_str(&msg.to_text().unwrap()) {
-                Ok(s) => s,
-                Err(e) => match e.classify() {
-                    Category::Io => {
-                        log::error!("{}: deserialize to string somehow causes I/O error", *uuid);
-                        // TODO: resend and retry... But how can this case even happen to be fair.
+
+        // make sure the message is valid before broadcasting...
+        let msg: WsExchangeMsg = match serde_json::from_str(&msg.to_text().unwrap()) {
+            Ok(s) => s,
+            Err(e) => match e.classify() {
+                Category::Io => {
+                    log::error!("{}: deserialize to string somehow causes I/O error", *uuid);
+                    // TODO: resend and retry... But how can this case even happen to be fair.
+                    return future::ok(());
+                }
+                _ => {
+                    log::warn!("Serializing for {}: {e}", *uuid);
+                    return future::ok(());
+                }
+            },
+        };
+        match &msg {
+            &WsExchangeMsg::Sdp {
+                send_to_id,
+                answering_peer_id,
+                ..
+            } => {
+                log::info!("SDP exchange from {send_to_id} to {answering_peer_id}");
+                if PEER_UUID_AND_SENDER.get(&answering_peer_id).is_none() {
+                    log::warn!(
+                        "Answering peer {answering_peer_id} does not exist (anymore). Skipping..."
+                    );
+                    return future::ok(());
+                }
+
+                let send_to_kv = match PEER_UUID_AND_SENDER.get(&send_to_id) {
+                    Some(kv) => kv,
+                    None => {
+                        log::warn!(
+                            "Send-to peer {send_to_id} does not exist (anymore). Skipping..."
+                        );
                         return future::ok(());
                     }
-                    _ => {
-                        log::warn!("Serializing for {}: {e}", *uuid);
-                        return future::ok(());
+                };
+                // and forward the message...
+                match send_to_kv.value().send(msg) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        log::warn!("Cannot forward message to {send_to_id}: {e}");
                     }
-                },
-            };
-            match recp.send(msg.clone()) {
-                Ok(()) => {}
-                Err(e) => {
-                    log::debug!("recp.send ignore: {e}");
                 }
             }
+            _ => {
+                log::warn!("Received wrong type of message: {msg:?}");
+                return future::ok(());
+            }
         }
+        // for recp in PEER_UUID_AND_SENDER
+        //     .iter()
+        //     .filter(|kv| kv.key() != &*uuid)
+        //     .map(|kv| kv.value().clone())
+        // {
+        //     match recp.send(msg.clone()) {
+        //         Ok(()) => {}
+        //         Err(e) => {
+        //             log::debug!("recp.send ignore: {e}");
+        //         }
+        //     }
+        // }
         future::ok(())
     });
     tokio::pin!(broadcast_incoming);

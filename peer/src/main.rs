@@ -44,7 +44,7 @@ async fn main() -> Result<(), String> {
     env_logger::init();
     let args = Opts::parse();
 
-    let (ws_stream, _) = tokio_tungstenite::connect_async(args.host)
+    let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{}", args.host))
         .await
         .map_err(|e| format!("{e}"))?;
 
@@ -145,9 +145,14 @@ async fn main() -> Result<(), String> {
                     log::info!("WIP: Create PeerConnection for {peer_id}, with this peer being the answerer")
                 }
                 WsExchangeMsg::Sdp {
+                    send_to_id,
                     answering_peer_id,
                     sdp,
                 } => {
+                    if send_to_id != *SELF_UUID.get().expect("SELF_UUID should already be set!") {
+                        log::warn!("Received a message destined to {send_to_id}");
+                        return future::ok(());
+                    }
                     log::info!("WIP: finish creating peer connection for {answering_peer_id}")
                     // let mut peer_data = match OTHER_PEERS.get_mut(&answering_peer_id) {
                     //     Some(data) => data,
@@ -167,6 +172,8 @@ async fn main() -> Result<(), String> {
             future::ok(())
         })
         .await;
+
+    log::info!("WebSocket connection with signaling server closed");
 
     Ok(())
 }
