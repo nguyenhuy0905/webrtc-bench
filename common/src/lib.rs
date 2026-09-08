@@ -29,4 +29,6 @@ pub enum WsExchangeMsg {
         answering_peer_id: Uuid,
         sdp: RTCSessionDescription,
     },
+    /// A peer just left
+    LeavePeerId(Uuid),
 }

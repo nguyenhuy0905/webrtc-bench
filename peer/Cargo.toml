@@ -17,3 +17,4 @@ dashmap.workspace = true
 uuid.workspace = true
 futures-util.workspace = true
 common = { path = "../common" }
+ctrlc.workspace = true

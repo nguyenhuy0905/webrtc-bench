@@ -2,14 +2,13 @@
 #![allow(unused)]
 use clap::Parser;
 use common::WsExchangeMsg;
-use dashmap::DashMap;
 use futures_util::{
     future,
     stream::{StreamExt, TryStreamExt},
     SinkExt,
 };
 use serde_json::error::Category;
-use std::{net::SocketAddr, pin::Pin, sync::LazyLock};
+use std::{collections::HashMap, net::SocketAddr, pin::Pin, sync::LazyLock};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{mpsc, RwLock},
@@ -48,15 +47,15 @@ async fn main() -> Result<(), String> {
                 Err(e) => match e {
                     TungsteniteError::ConnectionClosed => {
                         log::info!("Connection {addr} closed");
-                        remove_peer_addr(&addr);
+                        remove_peer_addr(&addr).await;
                     }
                     TungsteniteError::AttackAttempt => {
                         log::warn!("Attack attempt detected! Nuking the suspecting peer at once");
-                        remove_peer_addr(&addr);
+                        remove_peer_addr(&addr).await;
                     }
                     _ => {
                         log::warn!("Misc. error: {e}");
-                        remove_peer_addr(&addr);
+                        remove_peer_addr(&addr).await;
                     }
                 },
             }
@@ -77,14 +76,16 @@ async fn handle_connection(
     log::info!("WebSocket connection established for {addr}");
 
     // insert the new peer's info into the tables.
-    let (tx, mut rx) = mpsc::unbounded_channel::<WsExchangeMsg>();
+    // there shouldn't be *that* many signals, right?
+    let (tx, mut rx) = mpsc::channel::<WsExchangeMsg>(16);
     let mut uuid = Uuid::new_v4();
-    while PEER_UUID_AND_SENDER.get(&uuid).is_some() {
+    while PEER_UUID_AND_SENDER.read().await.get(&uuid).is_some() {
         uuid = Uuid::new_v4();
     }
-    PEER_UUID_AND_SENDER.insert(uuid, tx);
+    PEER_UUID_AND_SENDER.write().await.insert(uuid, tx);
+    PEER_ADDR_AND_UUID.write().await.insert(addr, uuid);
     // then send the peer its PeerID.
-    let (mut outgoing, incoming) = ws_stream.split();
+    let (mut outgoing, mut incoming) = ws_stream.split();
     outgoing
         .send(Message::from(
             serde_json::to_string(&WsExchangeMsg::JoinPeerId(uuid))
@@ -94,9 +95,14 @@ async fn handle_connection(
 
     // the current peer receives Peer IDs of all other peers.
     // All other peers receive the current peer's ID.
-    for kv in PEER_UUID_AND_SENDER.iter().filter(|kv| kv.key() != &uuid) {
+    for kv in PEER_UUID_AND_SENDER
+        .read()
+        .await
+        .iter()
+        .filter(|kv| kv.0 != &uuid)
+    {
         let msg_to_others = WsExchangeMsg::NewPeer { peer_id: uuid };
-        let msg_to_self = WsExchangeMsg::ExistingPeer { peer_id: *kv.key() };
+        let msg_to_self = WsExchangeMsg::ExistingPeer { peer_id: *kv.0 };
 
         let send_to_self = match serde_json::to_string(&msg_to_self) {
             Ok(ret) => ret,
@@ -116,84 +122,82 @@ async fn handle_connection(
                 continue;
             }
         }
-        match kv.value().send(msg_to_others) {
+        match kv.1.send(msg_to_others).await {
             Ok(()) => {}
             Err(e) => {
-                log::warn!("Cannot send {uuid} to {}: {e}", kv.key());
+                log::warn!("Cannot send {uuid} to {}: {e}", kv.0);
                 // TODO: we shouldn't just log and do nothing else for this error.
             }
         }
     }
 
     let uuid = Pin::new(&uuid);
-    let broadcast_incoming = incoming.try_for_each_concurrent(4, |msg| {
-        log::info!("Recv msg from {}: {}", *uuid, msg.to_text().unwrap());
+    let broadcast_incoming = async move {
+        while let Some(msg) = incoming.next().await {
+            let msg = match msg {
+                Ok(msg) => msg,
+                Err(e) => {
+                    log::warn!("Message error: {e}");
+                    // probably some kind of I/O error (stream closed, ...); just remove the peer.
+                    continue;
+                }
+            };
+            log::info!("Recv msg from {}: {}", *uuid, msg.to_text().unwrap());
 
-        // make sure the message is valid before broadcasting...
-        let msg: WsExchangeMsg = match serde_json::from_str(&msg.to_text().unwrap()) {
-            Ok(s) => s,
-            Err(e) => match e.classify() {
-                Category::Io => {
-                    log::error!("{}: deserialize to string somehow causes I/O error", *uuid);
-                    // TODO: resend and retry... But how can this case even happen to be fair.
-                    return future::ok(());
+            // make sure the message is valid before broadcasting...
+            let msg: WsExchangeMsg = match serde_json::from_str(&msg.to_text().unwrap()) {
+                Ok(s) => s,
+                Err(e) => match e.classify() {
+                    Category::Io => {
+                        log::error!("{}: deserialize to string somehow causes I/O error", *uuid);
+                        // TODO: resend and retry... But how can this case even happen to be fair.
+                        continue;
+                    }
+                    _ => {
+                        log::warn!("Serializing for {}: {e}", *uuid);
+                        continue;
+                    }
+                },
+            };
+            match &msg {
+                &WsExchangeMsg::Sdp {
+                    send_to_id,
+                    answering_peer_id,
+                    ..
+                } => {
+                    let read_lock = PEER_UUID_AND_SENDER.read().await;
+                    log::info!("SDP exchange from {send_to_id} to {answering_peer_id}");
+                    if read_lock.get(&answering_peer_id).is_none() {
+                        log::warn!(
+                            "Answering peer {answering_peer_id} does not exist (anymore). Skipping..."
+                        );
+                        continue;
+                    }
+
+                    let send_to_kv = match read_lock.get(&send_to_id) {
+                        Some(kv) => kv,
+                        None => {
+                            log::warn!(
+                                "Send-to peer {send_to_id} does not exist (anymore). Skipping..."
+                            );
+                            continue;
+                        }
+                    };
+                    // and forward the message...
+                    match send_to_kv.send(msg).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            log::warn!("Cannot forward message to {send_to_id}: {e}");
+                        }
+                    }
                 }
                 _ => {
-                    log::warn!("Serializing for {}: {e}", *uuid);
-                    return future::ok(());
+                    log::warn!("Received wrong type of message: {msg:?}");
+                    continue;
                 }
-            },
-        };
-        match &msg {
-            &WsExchangeMsg::Sdp {
-                send_to_id,
-                answering_peer_id,
-                ..
-            } => {
-                log::info!("SDP exchange from {send_to_id} to {answering_peer_id}");
-                if PEER_UUID_AND_SENDER.get(&answering_peer_id).is_none() {
-                    log::warn!(
-                        "Answering peer {answering_peer_id} does not exist (anymore). Skipping..."
-                    );
-                    return future::ok(());
-                }
-
-                let send_to_kv = match PEER_UUID_AND_SENDER.get(&send_to_id) {
-                    Some(kv) => kv,
-                    None => {
-                        log::warn!(
-                            "Send-to peer {send_to_id} does not exist (anymore). Skipping..."
-                        );
-                        return future::ok(());
-                    }
-                };
-                // and forward the message...
-                match send_to_kv.value().send(msg) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        log::warn!("Cannot forward message to {send_to_id}: {e}");
-                    }
-                }
-            }
-            _ => {
-                log::warn!("Received wrong type of message: {msg:?}");
-                return future::ok(());
             }
         }
-        // for recp in PEER_UUID_AND_SENDER
-        //     .iter()
-        //     .filter(|kv| kv.key() != &*uuid)
-        //     .map(|kv| kv.value().clone())
-        // {
-        //     match recp.send(msg.clone()) {
-        //         Ok(()) => {}
-        //         Err(e) => {
-        //             log::debug!("recp.send ignore: {e}");
-        //         }
-        //     }
-        // }
-        future::ok(())
-    });
+    };
     tokio::pin!(broadcast_incoming);
 
     let recv_from_others = async move {
@@ -225,16 +229,45 @@ async fn handle_connection(
         }
     };
 
+    // notify other peers that this peer is done and is quitting.
+    for recp in PEER_UUID_AND_SENDER
+        .read()
+        .await
+        .iter()
+        .filter(|kv| kv.0 != &*uuid)
+    {
+        let msg = WsExchangeMsg::LeavePeerId(*uuid);
+        match recp.1.send(msg).await {
+            Ok(()) => {}
+            Err(e) => {
+                log::debug!("Send leaving ID to {} ignored: {e}", recp.0);
+            }
+        }
+    }
+    // and remove this peer from the list
+    remove_peer_addr(&addr).await;
+    // this actually never prints...
+    log::info!("Peer {} removed", *uuid);
+    log::info!(
+        "Remaining peers: {:?}",
+        PEER_UUID_AND_SENDER
+            .read()
+            .await
+            .iter()
+            .map(|kv| *kv.0)
+            .collect::<Vec<_>>()
+    );
+
     Ok(())
 }
 
 /// Remove the peer with the specified address.
-fn remove_peer_addr(addr: &SocketAddr) {
-    if let Some(uuid) = PEER_ADDR_AND_UUID.get(&addr) {
-        PEER_UUID_AND_SENDER.remove(&uuid);
+async fn remove_peer_addr(addr: &SocketAddr) {
+    if let Some(uuid) = PEER_ADDR_AND_UUID.read().await.get(&addr) {
+        PEER_UUID_AND_SENDER.write().await.remove(&uuid);
         // drop borrow
         let uuid = 0;
-        PEER_ADDR_AND_UUID.remove(&addr);
+        PEER_ADDR_AND_UUID.write().await.remove(&addr);
     }
 }
 
@@ -246,6 +279,7 @@ struct Opts {
     host: String,
 }
 
-static PEER_UUID_AND_SENDER: LazyLock<DashMap<Uuid, mpsc::UnboundedSender<WsExchangeMsg>>> =
-    LazyLock::new(DashMap::new);
-static PEER_ADDR_AND_UUID: LazyLock<DashMap<SocketAddr, Uuid>> = LazyLock::new(DashMap::new);
+static PEER_UUID_AND_SENDER: LazyLock<RwLock<HashMap<Uuid, mpsc::Sender<WsExchangeMsg>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+static PEER_ADDR_AND_UUID: LazyLock<RwLock<HashMap<SocketAddr, Uuid>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
