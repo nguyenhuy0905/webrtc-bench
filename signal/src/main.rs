@@ -3,15 +3,14 @@
 use clap::Parser;
 use common::WsExchangeMsg;
 use futures_util::{
-    future,
+    SinkExt, future,
     stream::{StreamExt, TryStreamExt},
-    SinkExt,
 };
 use serde_json::error::Category;
 use std::{collections::HashMap, net::SocketAddr, pin::Pin, sync::LazyLock};
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{mpsc, RwLock},
+    sync::{RwLock, mpsc},
 };
 use tokio_tungstenite::tungstenite::{error::Error as TungsteniteError, protocol::Message};
 use uuid::Uuid;

@@ -12,9 +12,8 @@ use clap::Parser;
 use common::WsExchangeMsg;
 use dashmap::DashMap;
 use futures_util::{
-    future,
+    SinkExt, future,
     stream::{StreamExt, TryStreamExt},
-    SinkExt,
 };
 use rtc::{
     peer_connection::configuration::media_engine::MIME_TYPE_H264,
@@ -23,17 +22,17 @@ use rtc::{
     },
 };
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, LazyLock,
+    atomic::{AtomicBool, Ordering},
 };
-use tokio::sync::{mpsc, oneshot, OnceCell, RwLock};
+use tokio::sync::{OnceCell, RwLock, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::{error::Error as TungsteniteError, protocol::Message};
 use uuid::Uuid;
 use webrtc::{
     peer_connection::{
-        register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
-        PeerConnectionEventHandler, RTCConfiguration, RTCConfigurationBuilder,
-        RTCIceGatheringState, RTCIceServer, RTCPeerConnection, Registry,
+        MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
+        RTCConfiguration, RTCConfigurationBuilder, RTCIceGatheringState, RTCIceServer,
+        RTCPeerConnection, Registry, register_default_interceptors,
     },
     runtime::TokioRuntime,
 };
