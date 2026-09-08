@@ -82,12 +82,13 @@ async fn main() -> Result<(), String> {
         }])
         .build();
 
-    // 1. Tell the signaling server that I wanna join the channel.
-    write_stream
-        .send(Message::from(
-            serde_json::to_string(&WsExchangeMsg::Join).unwrap(),
-        ))
-        .await;
+    // 1. Tell the signaling server that I wanna join the channel. (to be fair, that's inferred from
+    //    the fact we initiated the WebSocket connecction).
+    // write_stream
+    //     .send(Message::from(
+    //         serde_json::to_string(&WsExchangeMsg::Join).unwrap(),
+    //     ))
+    //     .await;
     // then we can initialize our PeerID.
     let self_id: WsExchangeMsg = serde_json::from_str(
         read_stream
@@ -133,33 +134,34 @@ async fn main() -> Result<(), String> {
 
             // make sure message is very valid.
             match msg {
-                WsExchangeMsg::Join | WsExchangeMsg::JoinPeerId(_) => {
+                WsExchangeMsg::JoinPeerId(_) => {
                     log::warn!("Unexpected message: {msg:?}");
                     return future::ok(());
                 }
                 WsExchangeMsg::ExistingPeer { peer_id } => {
-                    todo!("Create PeerConnection for {peer_id}, with this peer being the offerer")
+                    log::info!("WIP: Create PeerConnection for {peer_id}, with this peer being the offerer")
                 }
                 WsExchangeMsg::NewPeer { peer_id } => {
-                    todo!("Create PeerConnection for {peer_id}, with this peer being the answerer")
+                    log::info!("WIP: Create PeerConnection for {peer_id}, with this peer being the answerer")
                 }
                 WsExchangeMsg::Sdp {
                     answering_peer_id,
                     sdp,
                 } => {
-                    let mut peer_data = match OTHER_PEERS.get_mut(&answering_peer_id) {
-                        Some(data) => data,
-                        None => {
-                            log::warn!("Peer {answering_peer_id} doesn't exist somehow");
-                            return future::ok(());
-                        }
-                    };
-                    if matches!(peer_data.value().1, PeerSetupStage::Done) {
-                        log::warn!("Trying to add SDP to an already-set-up peer");
-                        return future::ok(());
-                    }
-                    peer_data.value_mut().0.set_remote_description(sdp);
-                    peer_data.value_mut().1 = PeerSetupStage::Done;
+                    log::info!("WIP: finish creating peer connection for {answering_peer_id}")
+                    // let mut peer_data = match OTHER_PEERS.get_mut(&answering_peer_id) {
+                    //     Some(data) => data,
+                    //     None => {
+                    //         log::warn!("Peer {answering_peer_id} doesn't exist somehow");
+                    //         return future::ok(());
+                    //     }
+                    // };
+                    // if matches!(peer_data.value().1, PeerSetupStage::Done) {
+                    //     log::warn!("Trying to add SDP to an already-set-up peer");
+                    //     return future::ok(());
+                    // }
+                    // peer_data.value_mut().0.set_remote_description(sdp);
+                    // peer_data.value_mut().1 = PeerSetupStage::Done;
                 }
             }
             future::ok(())

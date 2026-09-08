@@ -83,9 +83,14 @@ async fn handle_connection(
         uuid = Uuid::new_v4();
     }
     PEER_UUID_AND_SENDER.insert(uuid, tx);
-    let uuid = Pin::new(&uuid);
-
+    // then send the peer its PeerID.
     let (mut outgoing, incoming) = ws_stream.split();
+    outgoing.send(Message::from(
+        serde_json::to_string(&WsExchangeMsg::JoinPeerId(uuid))
+            .expect("Cannot serialize JoinPeerId to JSON"),
+    )).await;
+
+    let uuid = Pin::new(&uuid);
     let broadcast_incoming = incoming.try_for_each_concurrent(4, |msg| {
         log::info!("Recv msg from {}: {}", *uuid, msg.to_text().unwrap());
         for recp in PEER_UUID_AND_SENDER

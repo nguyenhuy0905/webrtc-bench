@@ -9,9 +9,8 @@ use uuid::Uuid;
 /// 1 channel isn't going to be difficult.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum WsExchangeMsg {
-    /// Request from a peer to join. For now we assume 1 channel only.
-    /// Since we have only 1 channel to join, we need no extra info.
-    Join,
+    // Join isn't needed, creating the WebSocket channel is inferred as a join request.
+
     /// Response to a join request, from the signaling server, with the peer ID.
     JoinPeerId(Uuid),
     /// When a peer first joins, other peers are broadcasted the new peer's UUID. The peers already
