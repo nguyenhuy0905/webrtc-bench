@@ -22,8 +22,8 @@ use rtc::{
         RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
     },
 };
-use std::sync::{Arc, LazyLock};
-use tokio::sync::{mpsc, OnceCell, RwLock};
+use std::sync::{Arc, LazyLock, atomic::{AtomicBool, Ordering}};
+use tokio::sync::{mpsc, oneshot, OnceCell, RwLock};
 use tokio_tungstenite::tungstenite::{error::Error as TungsteniteError, protocol::Message};
 use uuid::Uuid;
 use webrtc::{
@@ -48,12 +48,17 @@ async fn main() -> Result<(), String> {
     env_logger::init();
     let args = Opts::parse();
 
+    // connect to signaling server
     let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{}", args.host))
         .await
         .map_err(|e| format!("{e}"))?;
-
     let (mut write_stream, mut read_stream) = ws_stream.split();
-    let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<WsExchangeMsg>();
+
+    // 0.0 <C-c> handler, so that the web socket properly closes
+    let (ctrlc_tx, mut ctrlc_rx) = mpsc::channel::<()>(1);
+    ctrlc::set_handler(move || {
+        ctrlc_tx.try_send(());
+    }).map_err(|e| format!("{e}"))?;
 
     // 0.1 configure media engine.
     // We can't really do much else if this fails...
@@ -115,139 +120,144 @@ async fn main() -> Result<(), String> {
     // 2. For each `ExistingPeer`, this peer is the offerer. And for each `NewPeer`, this peer is
     //    the answerer. `NewPeer` *can* override existing peer.
 
-    while let Some(msg) = read_stream.next().await {
-        let msg = match msg {
-            Ok(msg) => msg,
-            Err(e) => {
-                log::warn!("Invalid message: {e}");
-                continue;
-            }
-        };
-        // make sure message is sort-of valid
-        let msg = match msg.to_text() {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("Non-text message? {e}");
-                continue;
-            }
-        };
-        let msg: WsExchangeMsg = match serde_json::from_str(msg) {
-            Ok(ret) => ret,
-            Err(e) => {
-                log::warn!("Cannot understand message: {msg}");
-                continue;
-            }
-        };
+    tokio::spawn(async move {
+        while let Some(msg) = read_stream.next().await {
+            let msg = match msg {
+                Ok(msg) => msg,
+                Err(e) => {
+                    log::warn!("Invalid message: {e}");
+                    continue;
+                }
+            };
+            // make sure message is sort-of valid
+            let msg = match msg.to_text() {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("Non-text message? {e}");
+                    continue;
+                }
+            };
+            let msg: WsExchangeMsg = match serde_json::from_str(msg) {
+                Ok(ret) => ret,
+                Err(e) => {
+                    log::warn!("Cannot understand message: {msg}");
+                    continue;
+                }
+            };
 
-        // make sure message is very valid.
-        match msg {
-            WsExchangeMsg::JoinPeerId(_) => {
-                log::warn!("Unexpected message: {msg:?}");
-                continue;
-            }
-            WsExchangeMsg::ExistingPeer { peer_id } => {
-                log::info!(
+            // make sure message is very valid.
+            match msg {
+                WsExchangeMsg::JoinPeerId(_) => {
+                    log::warn!("Unexpected message: {msg:?}");
+                    continue;
+                }
+                WsExchangeMsg::ExistingPeer { peer_id } => {
+                    log::info!(
                     "WIP: Create PeerConnection for {peer_id}, with this peer being the offerer"
                 );
 
-                let (ice_gather_tx, mut ice_gather_rx) = mpsc::channel::<()>(1);
-                let handler = Arc::new(WebRtcHandler {
-                    gather_ice_complete: ice_gather_tx,
-                });
-                let registry =
-                    match register_default_interceptors(Registry::new(), &mut media_engine) {
-                        Ok(reg) => reg,
+                    let (ice_gather_tx, mut ice_gather_rx) = mpsc::channel::<()>(1);
+                    let handler = Arc::new(WebRtcHandler {
+                        gather_ice_complete: ice_gather_tx,
+                    });
+                    let registry =
+                        match register_default_interceptors(Registry::new(), &mut media_engine) {
+                            Ok(reg) => reg,
+                            Err(e) => {
+                                // really, how could this fail?
+                                log::error!("Registering default interceptors failed: {e}");
+                                continue;
+                            }
+                        };
+                    let peer_conn = match PeerConnectionBuilder::new()
+                        .with_configuration(config.clone())
+                        .with_media_engine(media_engine.clone())
+                        .with_interceptor_registry(registry)
+                        .with_handler(handler)
+                        .with_udp_addrs(vec!["0.0.0.0:0"])
+                        .with_runtime(runtime.clone())
+                        .build()
+                        .await
+                    {
+                        Ok(conn) => conn,
                         Err(e) => {
-                            // really, how could this fail?
-                            log::error!("Registering default interceptors failed: {e}");
+                            log::error!("Cannot create connection with {peer_id}: {e}");
+                            // TODO: we should probably retry, but anyways...
                             continue;
                         }
                     };
-                let peer_conn = match PeerConnectionBuilder::new()
-                    .with_configuration(config.clone())
-                    .with_media_engine(media_engine.clone())
-                    .with_interceptor_registry(registry)
-                    .with_handler(handler)
-                    .with_udp_addrs(vec!["0.0.0.0:0"])
-                    .with_runtime(runtime.clone())
-                    .build()
-                    .await
-                {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        log::error!("Cannot create connection with {peer_id}: {e}");
-                        // TODO: we should probably retry, but anyways...
-                        continue;
-                    }
-                };
 
-                let offer = match peer_conn.create_offer(None).await {
-                    Ok(offer) => offer,
-                    Err(e) => {
-                        log::error!("Cannot create offer: {e}");
-                        // TODO: we should probably retry, but anyways...
-                        continue;
+                    let offer = match peer_conn.create_offer(None).await {
+                        Ok(offer) => offer,
+                        Err(e) => {
+                            log::error!("Cannot create offer: {e}");
+                            // TODO: we should probably retry, but anyways...
+                            continue;
+                        }
+                    };
+                    match peer_conn.set_local_description(offer).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            log::error!("Cannot set offer as local description: {e}");
+                            continue;
+                        }
                     }
-                };
-                match peer_conn.set_local_description(offer).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        log::error!("Cannot set offer as local description: {e}");
-                        continue;
-                    }
-                }
-                match OTHER_PEERS.insert(
-                    peer_id,
-                    (Arc::new(peer_conn), PeerSetupStage::WaitingAnswer),
-                ) {
-                    Some(_) => {
-                        log::warn!("Peed ID {peer_id} already exists, overwriting...");
-                    }
-                    None => {
-                        log::info!(
+                    match OTHER_PEERS.insert(
+                        peer_id,
+                        (Arc::new(peer_conn), PeerSetupStage::WaitingAnswer),
+                    ) {
+                        Some(_) => {
+                            log::warn!("Peed ID {peer_id} already exists, overwriting...");
+                        }
+                        None => {
+                            log::info!(
                             "Created PeerConnection for {peer_id}, waiting for answer from peer..."
                         );
+                        }
                     }
-                }
 
-                // wait for ICE gathering to complete
-                ice_gather_rx.recv().await;
-            }
-            WsExchangeMsg::NewPeer { peer_id } => {
-                log::info!(
+                    // wait for ICE gathering to complete
+                    ice_gather_rx.recv().await;
+                }
+                WsExchangeMsg::NewPeer { peer_id } => {
+                    log::info!(
                     "WIP: Create PeerConnection for {peer_id}, with this peer being the answerer"
                 )
-            }
-            WsExchangeMsg::Sdp {
-                send_to_id,
-                answering_peer_id,
-                sdp,
-            } => {
-                if send_to_id != *SELF_UUID.get().expect("SELF_UUID should already be set!") {
-                    log::warn!("Received a message destined to {send_to_id}");
-                    continue;
                 }
-                log::info!("WIP: finish creating peer connection for {answering_peer_id}")
-                // let mut peer_data = match OTHER_PEERS.get_mut(&answering_peer_id) {
-                //     Some(data) => data,
-                //     None => {
-                //         log::warn!("Peer {answering_peer_id} doesn't exist somehow");
-                //         return future::ok(());
-                //     }
-                // };
-                // if matches!(peer_data.value().1, PeerSetupStage::Done) {
-                //     log::warn!("Trying to add SDP to an already-set-up peer");
-                //     return future::ok(());
-                // }
-                // peer_data.value_mut().0.set_remote_description(sdp);
-                // peer_data.value_mut().1 = PeerSetupStage::Done;
-            }
-            WsExchangeMsg::LeavePeerId(leaving_peer_id) => {
-                log::info!("Peer {leaving_peer_id} leaving");
-                OTHER_PEERS.remove(&leaving_peer_id);
+                WsExchangeMsg::Sdp {
+                    send_to_id,
+                    answering_peer_id,
+                    sdp,
+                } => {
+                    if send_to_id != *SELF_UUID.get().expect("SELF_UUID should already be set!") {
+                        log::warn!("Received a message destined to {send_to_id}");
+                        continue;
+                    }
+                    log::info!("WIP: finish creating peer connection for {answering_peer_id}")
+                    // let mut peer_data = match OTHER_PEERS.get_mut(&answering_peer_id) {
+                    //     Some(data) => data,
+                    //     None => {
+                    //         log::warn!("Peer {answering_peer_id} doesn't exist somehow");
+                    //         return future::ok(());
+                    //     }
+                    // };
+                    // if matches!(peer_data.value().1, PeerSetupStage::Done) {
+                    //     log::warn!("Trying to add SDP to an already-set-up peer");
+                    //     return future::ok(());
+                    // }
+                    // peer_data.value_mut().0.set_remote_description(sdp);
+                    // peer_data.value_mut().1 = PeerSetupStage::Done;
+                }
+                WsExchangeMsg::LeavePeerId(leaving_peer_id) => {
+                    log::info!("Peer {leaving_peer_id} leaving");
+                    OTHER_PEERS.remove(&leaving_peer_id);
+                }
             }
         }
-    }
+    });
+
+    // TODO: handle SIGINT.
+    ctrlc_rx.recv().await;
 
     log::info!("WebSocket connection with signaling server closed");
 
