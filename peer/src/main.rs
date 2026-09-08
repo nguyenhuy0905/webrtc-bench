@@ -32,8 +32,8 @@ use uuid::Uuid;
 use webrtc::{
     peer_connection::{
         register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
-        PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceGatheringState, RTCIceServer,
-        RTCPeerConnection, RTCConfiguration, Registry,
+        PeerConnectionEventHandler, RTCConfiguration, RTCConfigurationBuilder,
+        RTCIceGatheringState, RTCIceServer, RTCPeerConnection, Registry,
     },
     runtime::TokioRuntime,
 };
@@ -287,13 +287,13 @@ static SELF_UUID: OnceCell<Uuid> = OnceCell::const_new();
 static OTHER_PEERS: LazyLock<DashMap<Uuid, (Arc<dyn PeerConnection>, PeerSetupStage)>> =
     LazyLock::new(DashMap::new);
 static PEER_CONF: LazyLock<RTCConfiguration> = LazyLock::new(|| {
-        RTCConfigurationBuilder::new()
-            .with_ice_servers(vec![RTCIceServer {
-                // the STUN server we control.
-                urls: vec!["stun:127.0.0.1:3478".to_string()],
-                ..Default::default()
-            }])
-            .build()
+    RTCConfigurationBuilder::new()
+        .with_ice_servers(vec![RTCIceServer {
+            // the STUN server we control.
+            urls: vec!["stun:127.0.0.1:3478".to_string()],
+            ..Default::default()
+        }])
+        .build()
 });
 static RUNTIME: LazyLock<Arc<TokioRuntime>> = LazyLock::new(|| Arc::new(TokioRuntime));
 
