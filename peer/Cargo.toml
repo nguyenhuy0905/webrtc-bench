@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 webrtc.workspace = true
+rtc.workspace = true
 tokio.workspace = true
 log.workspace = true
 serde_json.workspace = true
@@ -14,3 +15,5 @@ clap.workspace = true
 tokio-tungstenite.workspace = true
 dashmap.workspace = true
 uuid.workspace = true
+futures-util.workspace = true
+common = { path = "../common" }
