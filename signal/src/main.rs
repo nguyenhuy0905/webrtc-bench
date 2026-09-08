@@ -84,6 +84,8 @@ async fn handle_connection(
     }
     PEER_UUID_AND_SENDER.write().await.insert(uuid, tx);
     PEER_ADDR_AND_UUID.write().await.insert(addr, uuid);
+    log::info!("Peer created: {uuid}");
+
     // then send the peer its PeerID.
     let (mut outgoing, mut incoming) = ws_stream.split();
     outgoing
@@ -117,9 +119,23 @@ async fn handle_connection(
         match outgoing.send(Message::from(send_to_self)).await {
             Ok(()) => {}
             Err(e) => {
-                log::warn!("Cannot send {uuid} its UUID: {e}");
-                // TODO: we shouldn't just log and do nothing else for this error.
-                continue;
+                match &e {
+                    TungsteniteError::ConnectionClosed => {
+                        log::warn!("Signaling connection closed!");
+                        // TODO: notify that this peer has left.
+                        return Err(e);
+                    }
+                    TungsteniteError::Io(io_err) => {
+                        log::error!("I/O error: {io_err}");
+                        // TODO: notify that this peer has left.
+                        return Err(e);
+                    }
+                    _ => {
+                        log::warn!("WebSocket error ignored: {e}");
+                        // TODO: retry instead of continue
+                        continue;
+                    }
+                }
             }
         }
         match kv.1.send(msg_to_others).await {
@@ -127,6 +143,7 @@ async fn handle_connection(
             Err(e) => {
                 log::warn!("Cannot send {uuid} to {}: {e}", kv.0);
                 // TODO: we shouldn't just log and do nothing else for this error.
+                continue;
             }
         }
     }
