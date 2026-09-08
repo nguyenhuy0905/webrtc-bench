@@ -48,8 +48,9 @@ python3 -m http.server
 }
 ```
 
-### Throwing SDPs around
-- Handled by `matchbox` actually...
-
 ### How do we stream videos?
 - The `webrtc` crate has some nice utilities to read from H264 and OPUS files...
+
+## Current issues
+- Peers leaving causes some sort of deadlock, or very high lock contention. If
+our peers don't leave though, there's no problem.

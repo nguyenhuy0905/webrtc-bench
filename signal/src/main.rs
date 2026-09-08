@@ -230,6 +230,7 @@ async fn handle_connection(
     };
 
     // notify other peers that this peer is done and is quitting.
+    log::info!("Trying to remove {}...", *uuid);
     for recp in PEER_UUID_AND_SENDER
         .read()
         .await
@@ -238,7 +239,9 @@ async fn handle_connection(
     {
         let msg = WsExchangeMsg::LeavePeerId(*uuid);
         match recp.1.send(msg).await {
-            Ok(()) => {}
+            Ok(()) => {
+                log::debug!("Sent remove signal of {} to {}", uuid, recp.0);
+            }
             Err(e) => {
                 log::debug!("Send leaving ID to {} ignored: {e}", recp.0);
             }
@@ -263,7 +266,9 @@ async fn handle_connection(
 
 /// Remove the peer with the specified address.
 async fn remove_peer_addr(addr: &SocketAddr) {
-    if let Some(uuid) = PEER_ADDR_AND_UUID.read().await.get(&addr) {
+    // `cloned` in hopes we drop the lock ASAP.
+    let uuid = PEER_ADDR_AND_UUID.read().await.get(&addr).cloned();
+    if let Some(uuid) = uuid {
         PEER_UUID_AND_SENDER.write().await.remove(&uuid);
         // drop borrow
         let uuid = 0;
