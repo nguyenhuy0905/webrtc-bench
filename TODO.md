@@ -1,9 +1,6 @@
 # Tasks and to-dos
 ## Signal server
-- Scrap the HTTP server idea, `matchbox` it is.
-## Others
-- One of the nodes is the NTP server. Probably will bolt that onto the
-signaling server node as well.
-- `nftables` configurations to rate-limit... Wait, no, `ufw` has limit rules.
-Use that one, the syntax is a lot less cursed than `nft` by itself... But, you
-will need to install `nft` either way.
+- DONE! Save for the ICE candidate exchange part...
+## Peers
+- Currently, when receiving a NewPeer signal, *then* an Sdp signal, the peer
+freezes. And probably times out the WebSocket it has with the server.

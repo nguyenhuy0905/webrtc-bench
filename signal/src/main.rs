@@ -203,6 +203,38 @@ async fn handle_connection(
                         }
                     }
                 }
+                &WsExchangeMsg::IceCandidate {
+                    send_to_id,
+                    answering_peer_id,
+                    ..
+                } => {
+                    // basically copy-paste of WsExchangeMsg::Sdp
+                    if PEER_UUID_AND_SENDER.get(&answering_peer_id).is_none() {
+                        log::warn!(
+                            "Answering peer {answering_peer_id} does not exist (anymore). Skipping..."
+                        );
+                        continue;
+                    }
+
+                    let send_to_kv = match PEER_UUID_AND_SENDER.get(&send_to_id) {
+                        Some(kv) => kv,
+                        None => {
+                            log::warn!(
+                                "Send-to peer {send_to_id} does not exist (anymore). Skipping..."
+                            );
+                            continue;
+                        }
+                    };
+                    // and forward the message...
+                    match send_to_kv.send(msg).await {
+                        Ok(()) => {
+                            log::info!("ICE candidate exchanged from {send_to_id} to {answering_peer_id}");
+                        }
+                        Err(e) => {
+                            log::warn!("Cannot forward message to {send_to_id}: {e}");
+                        }
+                    }
+                }
                 _ => {
                     log::warn!("Received wrong type of message: {msg:?}");
                     continue;

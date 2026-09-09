@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 // game plan here:
 // 0. set up some sort of signaling server. Of course.
 // 1. find a way for the peers to ping the signaling server.
@@ -12,23 +10,21 @@ use clap::Parser;
 use common::WsExchangeMsg;
 use dashmap::DashMap;
 use futures_util::{
-    future,
-    stream::{SplitSink, SplitStream, StreamExt, TryStreamExt},
+    stream::{SplitSink, SplitStream, StreamExt},
     SinkExt,
 };
 use rtc::{
     peer_connection::configuration::media_engine::MIME_TYPE_H264,
     rtp_transceiver::rtp_sender::{
-        RTCRtpCodec, RTCRtpCodecParameters, RTCRtpEncodingParameters, RtpCodecKind,
+        RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind,
     },
 };
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, LazyLock,
 };
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, oneshot, Mutex, OnceCell, RwLock},
+    sync::{mpsc, Mutex, OnceCell},
 };
 use tokio_tungstenite::{
     tungstenite::{error::Error as TungsteniteError, protocol::Message},
@@ -39,7 +35,7 @@ use webrtc::{
     peer_connection::{
         register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
         PeerConnectionEventHandler, RTCConfiguration, RTCConfigurationBuilder,
-        RTCIceGatheringState, RTCIceServer, RTCPeerConnection, RTCSessionDescription, Registry,
+        RTCIceGatheringState, RTCIceServer, RTCSessionDescription, Registry,
     },
     runtime::TokioRuntime,
 };
@@ -64,20 +60,17 @@ async fn main() -> Result<(), String> {
     let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{}", args.host))
         .await
         .map_err(|e| e.to_string())?;
-    let (mut write_stream, mut read_stream) = ws_stream.split();
+    let (write_stream, mut read_stream) = ws_stream.split();
 
     // 0.0 <C-c> handler, so that the web socket properly closes
     let (ctrlc_tx, mut ctrlc_rx) = mpsc::channel::<()>(1);
     ctrlc::set_handler(move || {
-        ctrlc_tx.try_send(());
+        let _ = ctrlc_tx.try_send(());
     })
     .map_err(|e| e.to_string())?;
 
     // 0.1 configure media engine.
     // We can't really do much else if this fails...
-
-    // 0.3 the runtime
-    let runtime = Arc::new(TokioRuntime);
 
     // 1. Tell the signaling server that I wanna join the channel. (to be fair, that's inferred from
     //    the fact we initiated the WebSocket connection).
@@ -116,9 +109,10 @@ async fn main() -> Result<(), String> {
     Ok(())
 }
 
+/// Grab the WebSocket read and write streams and handle any message that needs to be sent/recv.
 async fn handle_signal(
     mut read_stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
-    mut write_stream: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+    write_stream: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
 ) -> Result<(), String> {
     let write_stream = Arc::new(Mutex::new(write_stream));
     while let Some(msg) = read_stream.next().await {
@@ -155,7 +149,7 @@ async fn handle_signal(
         let msg: WsExchangeMsg = match serde_json::from_str(msg) {
             Ok(ret) => ret,
             Err(e) => {
-                log::warn!("Cannot understand message: {msg}");
+                log::warn!("Cannot understand message {msg}: {e}");
                 continue;
             }
         };
@@ -194,35 +188,39 @@ async fn handle_message(msg: WsExchangeMsg) -> Result<Option<WsExchangeMsg>, Str
             return Ok(None);
         }
         WsExchangeMsg::ExistingPeer { peer_id } => {
-            if let Some(return_offer) = add_peer(peer_id, true).await? {
-                return Ok(Some(WsExchangeMsg::Sdp {
-                    send_to_id: peer_id,
-                    answering_peer_id: *SELF_UUID.get().expect("SELF_UUID should already be set!"),
-                    sdp: return_offer,
-                }));
-            }
+            log::warn!("Add existing peer {peer_id}. This part of the code is bugged");
+            // if let Some(return_offer) = add_peer(peer_id, true).await? {
+            //     log::trace!("Sending offer to {peer_id}");
+            //     return Ok(Some(WsExchangeMsg::Sdp {
+            //         send_to_id: peer_id,
+            //         answering_peer_id: *SELF_UUID.get().expect("SELF_UUID should already be set!"),
+            //         sdp: return_offer,
+            //     }));
+            // }
         }
         WsExchangeMsg::NewPeer { peer_id } => {
-            add_peer(peer_id, false).await?;
+            log::warn!("Add new peer {peer_id}. This part of the code is bugged");
+            // add_peer(peer_id, false).await?;
         }
         WsExchangeMsg::Sdp {
-            send_to_id,
+            send_to_id: _,
             answering_peer_id,
-            sdp,
+            sdp: _,
         } => {
-            if send_to_id != *SELF_UUID.get().expect("SELF_UUID should already be set!") {
-                log::warn!("Received a message destined to {send_to_id}");
-                return Ok(None);
-            }
-            // log::info!("WIP: finish creating peer connection for {answering_peer_id}");
-            let send_back_opt = finish_configure_peer_connection(answering_peer_id, sdp).await?;
-            if let Some(send_back) = send_back_opt {
-                return Ok(Some(WsExchangeMsg::Sdp {
-                    send_to_id: answering_peer_id,
-                    answering_peer_id: send_to_id,
-                    sdp: send_back,
-                }));
-            }
+            log::warn!("Add SDP from {answering_peer_id}. This part of the code is bugged");
+            // if send_to_id != *SELF_UUID.get().expect("SELF_UUID should already be set!") {
+            //     log::warn!("Received a message destined to {send_to_id}");
+            //     return Ok(None);
+            // }
+            // let send_back_opt = finish_configure_peer_connection(answering_peer_id, sdp).await?;
+            // log::info!("Finished creating peer connection for {answering_peer_id}");
+            // if let Some(send_back) = send_back_opt {
+            //     return Ok(Some(WsExchangeMsg::Sdp {
+            //         send_to_id: answering_peer_id,
+            //         answering_peer_id: send_to_id,
+            //         sdp: send_back,
+            //     }));
+            // }
         }
         WsExchangeMsg::LeavePeerId(leaving_peer_id) => {
             log::info!("Peer {leaving_peer_id} leaving");
@@ -255,8 +253,78 @@ async fn handle_message(msg: WsExchangeMsg) -> Result<Option<WsExchangeMsg>, Str
     Ok(None)
 }
 
+#[allow(unused)]
+/// (Half)-Configures and adds a peer to OTHER_PEERS table.
+/// Half-configure because we still need to wait for an answer (if self_offer is true) or an offer
+/// (otherwise) from the other peer.
+/// Parameters:
+/// - peer_id: UUID of the peer to connect to.
+/// - self_offer: if true, this peer's local description is an offer, otherwise an answer.
+/// Return: if an offer needs to be sent, return Some(offer)
+/// TODO: don't just return a String as error.
+async fn add_peer(
+    peer_id: Uuid,
+    self_offer: bool,
+) -> Result<Option<RTCSessionDescription>, String> {
+    let peer_conn = create_empty_peer_connection(peer_id).await?;
+    log::trace!("Created empty peer connection for {peer_id}");
+
+    if self_offer {
+        let offer = match peer_conn.create_offer(None).await {
+            Ok(offer) => offer,
+            Err(e) => {
+                log::error!("Cannot create offer: {e}");
+                // TODO: we should probably retry, but anyways...
+                return Err(e.to_string());
+            }
+        };
+
+        match peer_conn.set_local_description(offer).await {
+            Ok(()) => {}
+            Err(e) => {
+                // this is probably an error on *my* end.
+                log::error!("Cannot set offer or answer as local description: {e}");
+                return Ok(None);
+            }
+        }
+    }
+
+    let return_offer = if self_offer {
+        peer_conn.local_description().await
+    } else {
+        None
+    };
+
+    match OTHER_PEERS.insert(
+        peer_id,
+        (
+            Arc::new(peer_conn),
+            if self_offer {
+                PeerSetupStage::WaitingAnswer
+            } else {
+                PeerSetupStage::WaitingOffer
+            },
+        ),
+    ) {
+        Some(_) => {
+            log::warn!(
+                "Peer ID {peer_id} already exists, overwriting and waiting for {} from peer...",
+                if self_offer { "answer" } else { "offer" }
+            );
+        }
+        None => {
+            log::info!(
+                "Created PeerConnection for {peer_id}, waiting for {} from peer...",
+                if self_offer { "answer" } else { "offer" }
+            );
+        }
+    }
+
+    Ok(return_offer)
+}
+
 /// By "empty" I mean a peer connection that hasn't been bound to a local or remote SDP yet.
-/// Return: if success, (peer-connection, ice-recv) where ice-recv is a receiver that receives when
+/// Returns the peer connection if successful.
 /// a ICE-gathering-complete signal is sent.
 async fn create_empty_peer_connection(
     peer_id: Uuid,
@@ -308,80 +376,10 @@ async fn create_empty_peer_connection(
     Ok(peer_conn)
 }
 
-/// (Half)-Configures and adds a peer to OTHER_PEERS table.
-/// Half-configure because we still need to wait for an answer (if self_offer is true) or an offer
-/// (otherwise) from the other peer.
-/// Parameters:
-/// - peer_id: UUID of the peer to connect to.
-/// - self_offer: if true, this peer's local description is an offer, otherwise an answer.
-/// Return: if an offer needs to be sent, return Some(offer)
-/// TODO: don't just return a String as error.
-async fn add_peer(
-    peer_id: Uuid,
-    self_offer: bool,
-) -> Result<Option<RTCSessionDescription>, String> {
-    let peer_conn = create_empty_peer_connection(peer_id).await?;
-    log::trace!("Created empty peer connection for {peer_id}");
-
-    if self_offer {
-        let offer = match peer_conn.create_offer(None).await {
-            Ok(offer) => offer,
-            Err(e) => {
-                log::error!("Cannot create offer: {e}");
-                // TODO: we should probably retry, but anyways...
-                return Err(e.to_string());
-            }
-        };
-
-        match peer_conn.set_local_description(offer).await {
-            Ok(()) => {}
-            Err(e) => {
-                // this is probably an error on *my* end.
-                log::error!("Cannot set offer or answer as local description: {e}");
-                return Ok(None);
-            }
-        }
-    }
-
-    log::trace!("Gathering ICE...");
-    
-    let return_offer = if self_offer {
-        peer_conn.local_description().await
-    } else {
-        None
-    };
-
-    match OTHER_PEERS.insert(
-        peer_id,
-        (
-            Arc::new(peer_conn),
-            if self_offer {
-                PeerSetupStage::WaitingAnswer
-            } else {
-                PeerSetupStage::WaitingOffer
-            },
-        ),
-    ) {
-        Some(_) => {
-            log::warn!(
-                "Peer ID {peer_id} already exists, overwriting and waiting for {} from peer...",
-                if self_offer { "answer" } else { "offer" }
-            );
-        }
-        None => {
-            log::info!(
-                "Created PeerConnection for {peer_id}, waiting for {} from peer...",
-                if self_offer { "answer" } else { "offer" }
-            );
-        }
-    }
-
-    Ok(return_offer)
-}
-
+#[allow(unused)]
 /// Given a half-configured PeerConnection (created by [`add_peer`]), and the SDP needed, complete
 /// the PeerConnection setup.
-/// Return the answer to be sent to the other end, if applicable.
+/// Return the answer to be sent via signaling server to the other end, if applicable.
 async fn finish_configure_peer_connection(
     peer_id: Uuid,
     sdp: RTCSessionDescription,
@@ -392,22 +390,23 @@ async fn finish_configure_peer_connection(
             // But, this is probably an error we can't really handle anyways.
             return Err("Peer {peer_id} doesn't exist!".into());
         }
-        Some(kv) => (kv.value().0.clone(), kv.value().1.clone()),
+        Some(kv) => (kv.value().0.clone(), kv.value().1),
     };
+    log::trace!("Checking setup stage...");
     match setup_stage {
         PeerSetupStage::Done => Err("Peer {peer_id} is already set up!".into()),
         PeerSetupStage::WaitingAnswer => {
-            peer_conn.set_remote_description(sdp);
+            peer_conn.set_remote_description(sdp).await.map_err(|e| e.to_string())?;
             log::info!("Set up PeerConnection with {peer_id}");
             Ok(None)
         }
         PeerSetupStage::WaitingOffer => {
-            peer_conn.set_remote_description(sdp);
+            peer_conn.set_remote_description(sdp).await.map_err(|e| e.to_string())?;
             let answer = peer_conn
                 .create_answer(None)
                 .await
                 .map_err(|e| e.to_string())?;
-            peer_conn.set_local_description(answer);
+            peer_conn.set_local_description(answer).await;
             log::info!("Need to send local description to {peer_id}");
             Ok(peer_conn.local_description().await)
         }
@@ -435,6 +434,7 @@ static RUNTIME: LazyLock<Arc<TokioRuntime>> = LazyLock::new(|| Arc::new(TokioRun
 enum PeerSetupStage {
     WaitingOffer,
     WaitingAnswer,
+    #[allow(unused)]
     Done,
 }
 
