@@ -228,7 +228,9 @@ async fn handle_connection(
                     // and forward the message...
                     match send_to_kv.send(msg).await {
                         Ok(()) => {
-                            log::info!("ICE candidate exchanged from {send_to_id} to {answering_peer_id}");
+                            log::info!(
+                                "ICE candidate exchanged from {send_to_id} to {answering_peer_id}"
+                            );
                         }
                         Err(e) => {
                             log::warn!("Cannot forward message to {send_to_id}: {e}");
