@@ -197,14 +197,6 @@ async fn handle_message(
         WsExchangeMsg::ExistingPeer { peer_id } => {
             log::warn!("Add existing peer {peer_id}. This part of the code is bugged");
             add_existing_peer(peer_id, outgoing.clone()).await?;
-            // if let Some(return_offer) = add_peer(peer_id, true).await? {
-            //     log::trace!("Sending offer to {peer_id}");
-            //     return Ok(Some(WsExchangeMsg::Sdp {
-            //         send_to_id: peer_id,
-            //         answering_peer_id: *SELF_UUID.get().expect("SELF_UUID should already be set!"),
-            //         sdp: return_offer,
-            //     }));
-            // }
         }
         WsExchangeMsg::NewPeer { peer_id } => {
             log::warn!("Add new peer {peer_id}. This part of the code is bugged");
@@ -222,15 +214,6 @@ async fn handle_message(
                 return Ok(());
             }
             finish_configure_peer_connection(answering_peer_id, sdp, outgoing.clone()).await?;
-            // let send_back_opt = finish_configure_peer_connection(answering_peer_id, sdp).await?;
-            // log::info!("Finished creating peer connection for {answering_peer_id}");
-            // if let Some(send_back) = send_back_opt {
-            //     return Ok(Some(WsExchangeMsg::Sdp {
-            //         send_to_id: answering_peer_id,
-            //         answering_peer_id: send_to_id,
-            //         sdp: send_back,
-            //     }));
-            // }
         }
         WsExchangeMsg::LeavePeerId(leaving_peer_id) => {
             log::info!("Peer {leaving_peer_id} leaving");
@@ -427,166 +410,6 @@ async fn finish_configure_peer_connection(
         }
     }
 }
-
-// #[allow(unused)]
-// /// (Half)-Configures and adds a peer to OTHER_PEERS table.
-// /// Half-configure because we still need to wait for an answer (if self_offer is true) or an offer
-// /// (otherwise) from the other peer.
-// /// Parameters:
-// /// - peer_id: UUID of the peer to connect to.
-// /// - self_offer: if true, this peer's local description is an offer, otherwise an answer.
-// /// Return: if an offer needs to be sent, return Some(offer)
-// /// TODO: don't just return a String as error.
-// async fn add_peer(
-//     peer_id: Uuid,
-//     self_offer: bool,
-// ) -> Result<Option<RTCSessionDescription>, String> {
-//     let peer_conn = create_empty_peer_connection(peer_id).await?;
-//     log::trace!("Created empty peer connection for {peer_id}");
-//
-//     if self_offer {
-//         let offer = match peer_conn.create_offer(None).await {
-//             Ok(offer) => offer,
-//             Err(e) => {
-//                 log::error!("Cannot create offer: {e}");
-//                 // TODO: we should probably retry, but anyways...
-//                 return Err(e.to_string());
-//             }
-//         };
-//
-//         match peer_conn.set_local_description(offer).await {
-//             Ok(()) => {}
-//             Err(e) => {
-//                 // this is probably an error on *my* end.
-//                 log::error!("Cannot set offer or answer as local description: {e}");
-//                 return Ok(None);
-//             }
-//         }
-//     }
-//
-//     let return_offer = if self_offer {
-//         peer_conn.local_description().await
-//     } else {
-//         None
-//     };
-//
-//     match OTHER_PEERS.insert(
-//         peer_id,
-//         (
-//             Arc::new(peer_conn),
-//             if self_offer {
-//                 PeerSetupStage::WaitingAnswer
-//             } else {
-//                 PeerSetupStage::WaitingOffer
-//             },
-//         ),
-//     ) {
-//         Some(_) => {
-//             log::warn!(
-//                 "Peer ID {peer_id} already exists, overwriting and waiting for {} from peer...",
-//                 if self_offer { "answer" } else { "offer" }
-//             );
-//         }
-//         None => {
-//             log::info!(
-//                 "Created PeerConnection for {peer_id}, waiting for {} from peer...",
-//                 if self_offer { "answer" } else { "offer" }
-//             );
-//         }
-//     }
-//
-//     Ok(return_offer)
-// }
-//
-// /// By "empty" I mean a peer connection that hasn't been bound to a local or remote SDP yet.
-// /// Returns the peer connection if successful.
-// /// a ICE-gathering-complete signal is sent.
-// async fn create_empty_peer_connection(
-//     peer_id: Uuid,
-// ) -> Result<impl PeerConnection, String> {
-//     let handler = Arc::new(WebRtcHandler {
-//     });
-//     let mut media_engine = MediaEngine::default();
-//     let video_codec = RTCRtpCodecParameters {
-//         rtp_codec: RTCRtpCodec {
-//             mime_type: MIME_TYPE_H264.to_owned(),
-//             clock_rate: 90_000,
-//             channels: 0,
-//             // what does this mean? I dunno.
-//             sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-//                 .to_owned(),
-//             rtcp_feedback: vec![],
-//         },
-//         // h264 or something...
-//         payload_type: 102,
-//     };
-//     media_engine
-//         .register_codec(video_codec, RtpCodecKind::Video)
-//         .map_err(|e| e.to_string())?;
-//     let registry = match register_default_interceptors(Registry::new(), &mut media_engine) {
-//         Ok(reg) => reg,
-//         Err(e) => {
-//             // really, how could this fail?
-//             log::error!("Registering default interceptors failed: {e}");
-//             return Err(e.to_string());
-//         }
-//     };
-//     let peer_conn = match PeerConnectionBuilder::new()
-//         .with_configuration(PEER_CONF.clone())
-//         .with_media_engine(media_engine.clone())
-//         .with_interceptor_registry(registry)
-//         .with_handler(handler)
-//         .with_udp_addrs(vec!["0.0.0.0:0"])
-//         .with_runtime(RUNTIME.clone())
-//         .build()
-//         .await
-//     {
-//         Ok(conn) => conn,
-//         Err(e) => {
-//             log::error!("Cannot create connection with {peer_id}: {e}");
-//             // TODO: we should probably retry, but anyways...
-//             return Err(e.to_string());
-//         }
-//     };
-//     Ok(peer_conn)
-// }
-//
-// #[allow(unused)]
-// /// Given a half-configured PeerConnection (created by [`add_peer`]), and the SDP needed, complete
-// /// the PeerConnection setup.
-// /// Return the answer to be sent via signaling server to the other end, if applicable.
-// async fn finish_configure_peer_connection(
-//     peer_id: uuid,
-//     sdp: rtcsessiondescription,
-// ) -> Result<Option<RTCSessionDescription>, String> {
-//     let (peer_conn, setup_stage) = match OTHER_PEERS.get(&peer_id) {
-//         None => {
-//             // TODO: we should return something other than a String.
-//             // But, this is probably an error we can't really handle anyways.
-//             return Err("Peer {peer_id} doesn't exist!".into());
-//         }
-//         Some(kv) => (kv.value().0.clone(), kv.value().1),
-//     };
-//     log::trace!("Checking setup stage...");
-//     match setup_stage {
-//         PeerSetupStage::Done => Err("Peer {peer_id} is already set up!".into()),
-//         PeerSetupStage::WaitingAnswer => {
-//             peer_conn.set_remote_description(sdp).await.map_err(|e| e.to_string())?;
-//             log::info!("Set up PeerConnection with {peer_id}");
-//             Ok(None)
-//         }
-//         PeerSetupStage::WaitingOffer => {
-//             peer_conn.set_remote_description(sdp).await.map_err(|e| e.to_string())?;
-//             let answer = peer_conn
-//                 .create_answer(None)
-//                 .await
-//                 .map_err(|e| e.to_string())?;
-//             peer_conn.set_local_description(answer).await;
-//             log::info!("Need to send local description to {peer_id}");
-//             Ok(peer_conn.local_description().await)
-//         }
-//     }
-// }
 
 /// This peer's own UUID. We'll only receive this after asking the signaling server to join.
 static SELF_UUID: OnceCell<Uuid> = OnceCell::const_new();
