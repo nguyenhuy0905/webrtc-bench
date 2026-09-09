@@ -446,7 +446,6 @@ enum PeerSetupStage {
     WaitingOffer,
     WaitingAnswer,
     Done,
-    // TODO: add a state of "I'm still waiting for ICE candidates"
 }
 
 struct WebRtcHandler {
@@ -456,12 +455,6 @@ struct WebRtcHandler {
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for WebRtcHandler {
     async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
-        // log::info!(
-        //     "WIP: do something with new ice candidate: {:?} {}:{}",
-        //     event.candidate.typ,
-        //     event.candidate.address,
-        //     event.candidate.port
-        // );
         match event.candidate.to_json() {
             Ok(candidate_init) => {
                 if let Err(e) = self
