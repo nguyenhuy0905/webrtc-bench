@@ -35,6 +35,7 @@ use webrtc::{
         RTCIceGatheringState, RTCIceServer, RTCPeerConnectionIceEvent, RTCSessionDescription,
         Registry,
     },
+    data_channel::DataChannel,
     runtime::TokioRuntime,
 };
 
@@ -195,13 +196,12 @@ async fn handle_message(
             return Ok(());
         }
         WsExchangeMsg::ExistingPeer { peer_id } => {
-            log::warn!("Add existing peer {peer_id}. This part of the code is bugged");
+            // log::warn!("Add existing peer {peer_id}. This part of the code is bugged");
             add_existing_peer(peer_id, outgoing.clone()).await?;
         }
         WsExchangeMsg::NewPeer { peer_id } => {
-            log::warn!("Add new peer {peer_id}. This part of the code is bugged");
+            // log::warn!("Add new peer {peer_id}. This part of the code is bugged");
             add_new_peer(peer_id, outgoing.clone()).await?;
-            // add_peer(peer_id, false).await?;
         }
         WsExchangeMsg::Sdp {
             send_to_id,
@@ -336,6 +336,9 @@ async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>) -> R
     let peer_conn = create_empty_peer_connection(peer_id, outgoing.clone()).await?;
     log::trace!("Created empty peer connection for {peer_id}");
 
+    if let Err(e) = peer_conn.create_data_channel("Data", None).await {
+        log::error!("Failed to create data channel: {e}");
+    }
     let offer = peer_conn
         .create_offer(None)
         .await
@@ -352,8 +355,10 @@ async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>) -> R
         })
         .await
     {
-        log::error!("Cannot send SDP to remote peer: {e}");
+        log::error!("Cannot send SDP to {peer_id}: {e}");
+        return Err(e.to_string());
     };
+    log::debug!("Sent SDP to {peer_id}");
 
     match OTHER_PEERS.insert(
         peer_id,
@@ -388,11 +393,17 @@ async fn finish_configure_peer_connection(
     match setup_stage {
         PeerSetupStage::Done => return Err("Peer {peer_id} is already set up!".into()),
         PeerSetupStage::WaitingAnswer => {
-            peer_conn.set_remote_description(sdp).await.map_err(|e| e.to_string())?;
+            if let Err(e) = peer_conn.set_remote_description(sdp).await {
+                log::error!("PeerConnection with {peer_id}: {e}");
+                return Err(e.to_string());
+            }
             log::info!("Set up PeerConnection with {peer_id}");
         }
         PeerSetupStage::WaitingOffer => {
-            peer_conn.set_remote_description(sdp).await.map_err(|e| e.to_string())?;
+            if let Err(e) = peer_conn.set_remote_description(sdp).await {
+                log::error!("PeerConnection with {peer_id}: {e}");
+                return Err(e.to_string());
+            }
             let answer = peer_conn
                 .create_answer(None)
                 .await
@@ -434,14 +445,13 @@ static RUNTIME: LazyLock<Arc<TokioRuntime>> = LazyLock::new(|| Arc::new(TokioRun
 enum PeerSetupStage {
     WaitingOffer,
     WaitingAnswer,
-    #[allow(unused)]
     Done,
+    // TODO: add a state of "I'm still waiting for ICE candidates"
 }
 
 struct WebRtcHandler {
     other_peer_id: Uuid,
     ws_out_tx: mpsc::Sender<WsExchangeMsg>,
-    // TODO: ping the ICE candidate when `on_ice_candidate`
 }
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for WebRtcHandler {
@@ -476,5 +486,9 @@ impl PeerConnectionEventHandler for WebRtcHandler {
 
     async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
         log::debug!("gathering state: {state}");
+    }
+
+    async fn on_data_channel(&self, channel: Arc<dyn DataChannel>) {
+        log::info!("onDataChannel run!");
     }
 }
