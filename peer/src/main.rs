@@ -12,8 +12,9 @@ use clap::Parser;
 use common::WsExchangeMsg;
 use dashmap::DashMap;
 use futures_util::{
-    SinkExt, future,
-    stream::{StreamExt, TryStreamExt},
+    future,
+    stream::{SplitStream, StreamExt, TryStreamExt},
+    SinkExt,
 };
 use rtc::{
     peer_connection::configuration::media_engine::MIME_TYPE_H264,
@@ -22,17 +23,23 @@ use rtc::{
     },
 };
 use std::sync::{
-    Arc, LazyLock,
     atomic::{AtomicBool, Ordering},
+    Arc, LazyLock,
 };
-use tokio::sync::{OnceCell, RwLock, mpsc, oneshot};
-use tokio_tungstenite::tungstenite::{error::Error as TungsteniteError, protocol::Message};
+use tokio::{
+    net::TcpStream,
+    sync::{mpsc, oneshot, OnceCell, RwLock},
+};
+use tokio_tungstenite::{
+    tungstenite::{error::Error as TungsteniteError, protocol::Message},
+    MaybeTlsStream, WebSocketStream,
+};
 use uuid::Uuid;
 use webrtc::{
     peer_connection::{
-        MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
-        RTCConfiguration, RTCConfigurationBuilder, RTCIceGatheringState, RTCIceServer,
-        RTCPeerConnection, Registry, register_default_interceptors,
+        register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
+        PeerConnectionEventHandler, RTCConfiguration, RTCConfigurationBuilder,
+        RTCIceGatheringState, RTCIceServer, RTCPeerConnection, Registry,
     },
     runtime::TokioRuntime,
 };
@@ -56,7 +63,7 @@ async fn main() -> Result<(), String> {
     // connect to signaling server
     let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{}", args.host))
         .await
-        .map_err(|e| format!("{e}"))?;
+        .map_err(|e| e.to_string())?;
     let (mut write_stream, mut read_stream) = ws_stream.split();
 
     // 0.0 <C-c> handler, so that the web socket properly closes
@@ -64,7 +71,7 @@ async fn main() -> Result<(), String> {
     ctrlc::set_handler(move || {
         ctrlc_tx.try_send(());
     })
-    .map_err(|e| format!("{e}"))?;
+    .map_err(|e| e.to_string())?;
 
     // 0.1 configure media engine.
     // We can't really do much else if this fails...
@@ -100,49 +107,7 @@ async fn main() -> Result<(), String> {
     // 2. For each `ExistingPeer`, this peer is the offerer. And for each `NewPeer`, this peer is
     //    the answerer. `NewPeer` *can* override existing peer.
 
-    tokio::spawn(async move {
-        while let Some(msg) = read_stream.next().await {
-            let msg = match msg {
-                Ok(msg) => msg,
-                Err(e) => {
-                    match e {
-                        TungsteniteError::ConnectionClosed => {
-                            // can't recover...
-                            log::warn!("Signaling connection closed!");
-                            break;
-                        }
-                        TungsteniteError::Io(io_err) => {
-                            // can't recover...
-                            log::error!("I/O error: {io_err}");
-                            break;
-                        }
-                        _ => {
-                            log::warn!("WebSocket error ignored: {e}");
-                            continue;
-                        }
-                    }
-                }
-            };
-            // make sure message is sort-of valid
-            let msg = match msg.to_text() {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!("Non-text message? {e}");
-                    continue;
-                }
-            };
-            let msg: WsExchangeMsg = match serde_json::from_str(msg) {
-                Ok(ret) => ret,
-                Err(e) => {
-                    log::warn!("Cannot understand message: {msg}");
-                    continue;
-                }
-            };
-
-            // make sure message is very valid.
-            handle_message(msg).await;
-        }
-    });
+    tokio::spawn(handle_signal(read_stream));
 
     ctrlc_rx.recv().await;
 
@@ -151,101 +116,70 @@ async fn main() -> Result<(), String> {
     Ok(())
 }
 
+async fn handle_signal(
+    mut read_stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+) -> Result<(), String> {
+    while let Some(msg) = read_stream.next().await {
+        // convert message from Result<Message, TungsteniteError> to WsExchangeMsg.
+        let msg = match msg {
+            Ok(msg) => msg,
+            Err(e) => {
+                match e {
+                    TungsteniteError::ConnectionClosed => {
+                        // can't recover...
+                        log::warn!("Signaling connection closed!");
+                        break;
+                    }
+                    TungsteniteError::Io(io_err) => {
+                        // can't recover...
+                        log::error!("I/O error: {io_err}");
+                        break;
+                    }
+                    _ => {
+                        log::warn!("WebSocket error ignored: {e}");
+                        continue;
+                    }
+                }
+            }
+        };
+        // make sure message is sort-of valid
+        let msg = match msg.to_text() {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Non-text message? {e}");
+                continue;
+            }
+        };
+        let msg: WsExchangeMsg = match serde_json::from_str(msg) {
+            Ok(ret) => ret,
+            Err(e) => {
+                log::warn!("Cannot understand message: {msg}");
+                continue;
+            }
+        };
+
+        handle_message(msg).await;
+    }
+    Ok(())
+}
+
+/// Given a WsExchangeMsg, deal with it!
+/// TODO: don't return a String as error... we can do better.
 async fn handle_message(msg: WsExchangeMsg) -> Result<(), String> {
+    // make sure message is very valid.
     match msg {
         WsExchangeMsg::JoinPeerId(_) => {
             log::warn!("Unexpected message: {msg:?}");
             return Ok(());
         }
         WsExchangeMsg::ExistingPeer { peer_id } => {
-            log::info!(
-                "WIP: Create PeerConnection for {peer_id}, with this peer being the offerer"
-            );
-
-            let (ice_gather_tx, mut ice_gather_rx) = mpsc::channel::<()>(1);
-            let handler = Arc::new(WebRtcHandler {
-                gather_ice_complete: ice_gather_tx,
-            });
-            let mut media_engine = MediaEngine::default();
-            let video_codec = RTCRtpCodecParameters {
-                rtp_codec: RTCRtpCodec {
-                    mime_type: MIME_TYPE_H264.to_owned(),
-                    clock_rate: 90_000,
-                    channels: 0,
-                    // what does this mean? I dunno.
-                    sdp_fmtp_line:
-                        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-                            .to_owned(),
-                    rtcp_feedback: vec![],
-                },
-                // h264 or something...
-                payload_type: 102,
-            };
-            media_engine
-                .register_codec(video_codec, RtpCodecKind::Video)
-                .map_err(|e| format!("{e}"))?;
-            let registry = match register_default_interceptors(Registry::new(), &mut media_engine) {
-                Ok(reg) => reg,
-                Err(e) => {
-                    // really, how could this fail?
-                    log::error!("Registering default interceptors failed: {e}");
-                    return Ok(());
-                }
-            };
-            let peer_conn = match PeerConnectionBuilder::new()
-                .with_configuration(PEER_CONF.clone())
-                .with_media_engine(media_engine.clone())
-                .with_interceptor_registry(registry)
-                .with_handler(handler)
-                .with_udp_addrs(vec!["0.0.0.0:0"])
-                .with_runtime(RUNTIME.clone())
-                .build()
-                .await
-            {
-                Ok(conn) => conn,
-                Err(e) => {
-                    log::error!("Cannot create connection with {peer_id}: {e}");
-                    // TODO: we should probably retry, but anyways...
-                    return Ok(());
-                }
-            };
-
-            let offer = match peer_conn.create_offer(None).await {
-                Ok(offer) => offer,
-                Err(e) => {
-                    log::error!("Cannot create offer: {e}");
-                    // TODO: we should probably retry, but anyways...
-                    return Ok(());
-                }
-            };
-            match peer_conn.set_local_description(offer).await {
-                Ok(()) => {}
-                Err(e) => {
-                    log::error!("Cannot set offer as local description: {e}");
-                    return Ok(());
-                }
-            }
-            match OTHER_PEERS.insert(
-                peer_id,
-                (Arc::new(peer_conn), PeerSetupStage::WaitingAnswer),
-            ) {
-                Some(_) => {
-                    log::warn!("Peed ID {peer_id} already exists, overwriting...");
-                }
-                None => {
-                    log::info!(
-                        "Created PeerConnection for {peer_id}, waiting for answer from peer..."
-                    );
-                }
-            }
-
-            // wait for ICE gathering to complete
-            ice_gather_rx.recv().await;
+            create_empty_peer_connection(peer_id).await?;
+            // add_peer(peer_id, true).await?;
         }
         WsExchangeMsg::NewPeer { peer_id } => {
-            log::info!(
-                "WIP: Create PeerConnection for {peer_id}, with this peer being the answerer"
-            )
+            create_empty_peer_connection(peer_id).await?;
+            // WARN: currently errs out... I should wait for the SDP offer.
+            // add_peer(peer_id, false).await?;
         }
         WsExchangeMsg::Sdp {
             send_to_id,
@@ -279,6 +213,120 @@ async fn handle_message(msg: WsExchangeMsg) -> Result<(), String> {
     Ok(())
 }
 
+/// By "empty" I mean a peer connection that hasn't been bound to a local or remote SDP yet.
+/// Return: if success, (peer-connection, ice-recv) where ice-recv is a receiver that receives when
+/// a ICE-gathering-complete signal is sent.
+async fn create_empty_peer_connection(peer_id: Uuid) -> Result<(impl PeerConnection, mpsc::Receiver<()>), String> {
+    let (ice_gather_tx, ice_gather_rx) = mpsc::channel::<()>(1);
+    let handler = Arc::new(WebRtcHandler {
+        gather_ice_complete: ice_gather_tx,
+    });
+    let mut media_engine = MediaEngine::default();
+    let video_codec = RTCRtpCodecParameters {
+        rtp_codec: RTCRtpCodec {
+            mime_type: MIME_TYPE_H264.to_owned(),
+            clock_rate: 90_000,
+            channels: 0,
+            // what does this mean? I dunno.
+            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                .to_owned(),
+            rtcp_feedback: vec![],
+        },
+        // h264 or something...
+        payload_type: 102,
+    };
+    media_engine
+        .register_codec(video_codec, RtpCodecKind::Video)
+        .map_err(|e| e.to_string())?;
+    let registry = match register_default_interceptors(Registry::new(), &mut media_engine) {
+        Ok(reg) => reg,
+        Err(e) => {
+            // really, how could this fail?
+            log::error!("Registering default interceptors failed: {e}");
+            return Err(e.to_string());
+        }
+    };
+    let peer_conn = match PeerConnectionBuilder::new()
+        .with_configuration(PEER_CONF.clone())
+        .with_media_engine(media_engine.clone())
+        .with_interceptor_registry(registry)
+        .with_handler(handler)
+        .with_udp_addrs(vec!["0.0.0.0:0"])
+        .with_runtime(RUNTIME.clone())
+        .build()
+        .await
+    {
+        Ok(conn) => conn,
+        Err(e) => {
+            log::error!("Cannot create connection with {peer_id}: {e}");
+            // TODO: we should probably retry, but anyways...
+            return Err(e.to_string());
+        }
+    };
+    Ok((peer_conn, ice_gather_rx))
+}
+
+/// Run when WsExchangeMsg::ExistingPeer is met.
+/// Parameters:
+/// - peer_id: UUID of the peer to connect to.
+/// - self_offer: if true, this peer's local description is an offer, otherwise an answer.
+/// TODO: don't just return a String as error.
+async fn add_peer(peer_id: Uuid, self_offer: bool) -> Result<(), String> {
+    log::info!(
+        "WIP: Create PeerConnection for {peer_id}, with this peer being the {}",
+        if self_offer { "offerer" } else { "answerer" }
+    );
+
+    let (peer_conn, mut ice_gather_rx) = create_empty_peer_connection(peer_id).await?;
+
+    let self_sdp = if self_offer {
+        match peer_conn.create_offer(None).await {
+            Ok(offer) => offer,
+            Err(e) => {
+                log::error!("Cannot create offer: {e}");
+                // TODO: we should probably retry, but anyways...
+                return Err(e.to_string());
+            }
+        }
+    } else {
+        match peer_conn.create_answer(None).await {
+            Ok(answer) => answer,
+            Err(e) => {
+                log::error!("Cannot create answer: {e}");
+                // TODO: we should probably retry, but anyways...
+                return Err(e.to_string());
+            }
+        }
+    };
+    match peer_conn.set_local_description(self_sdp).await {
+        Ok(()) => {}
+        Err(e) => {
+            // this is probably an error on *my* end.
+            log::error!("Cannot set offer or answer as local description: {e}");
+            return Ok(());
+        }
+    }
+
+    match OTHER_PEERS.insert(peer_id, (Arc::new(peer_conn), PeerSetupStage::WaitingSdp)) {
+        Some(_) => {
+            log::warn!(
+                "Peed ID {peer_id} already exists, overwriting and waiting for {} from peer...",
+                if self_offer { "offer" } else { "answer" }
+            );
+        }
+        None => {
+            log::info!(
+                "Created PeerConnection for {peer_id}, waiting for {} from peer...",
+                if self_offer { "offer" } else { "answer" }
+            );
+        }
+    }
+
+    // wait for ICE gathering to complete
+    ice_gather_rx.recv().await;
+    Ok(())
+}
+
 /// This peer's own UUID. We'll only receive this after asking the signaling server to join.
 static SELF_UUID: OnceCell<Uuid> = OnceCell::const_new();
 /// We got stuff to send, we send to each of them.
@@ -297,7 +345,7 @@ static PEER_CONF: LazyLock<RTCConfiguration> = LazyLock::new(|| {
 static RUNTIME: LazyLock<Arc<TokioRuntime>> = LazyLock::new(|| Arc::new(TokioRuntime));
 
 enum PeerSetupStage {
-    WaitingAnswer,
+    WaitingSdp,
     Done,
 }
 
