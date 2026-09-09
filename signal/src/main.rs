@@ -8,10 +8,10 @@ use futures_util::{
     stream::{StreamExt, TryStreamExt},
 };
 use serde_json::error::Category;
-use std::{collections::HashMap, net::SocketAddr, pin::Pin, sync::LazyLock};
+use std::{net::SocketAddr, pin::Pin, sync::LazyLock};
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{RwLock, mpsc},
+    sync::mpsc,
 };
 use tokio_tungstenite::tungstenite::{error::Error as TungsteniteError, protocol::Message};
 use uuid::Uuid;
