@@ -177,7 +177,6 @@ async fn handle_connection(
                     answering_peer_id,
                     ..
                 } => {
-                    log::info!("SDP exchange from {send_to_id} to {answering_peer_id}");
                     if PEER_UUID_AND_SENDER.get(&answering_peer_id).is_none() {
                         log::warn!(
                             "Answering peer {answering_peer_id} does not exist (anymore). Skipping..."
@@ -196,7 +195,9 @@ async fn handle_connection(
                     };
                     // and forward the message...
                     match send_to_kv.send(msg).await {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            log::info!("SDP exchanged from {send_to_id} to {answering_peer_id}");
+                        }
                         Err(e) => {
                             log::warn!("Cannot forward message to {send_to_id}: {e}");
                         }

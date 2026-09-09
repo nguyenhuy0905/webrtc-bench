@@ -2,7 +2,7 @@
 #![allow(unused)]
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use webrtc::peer_connection::RTCSessionDescription;
+use webrtc::peer_connection::{RTCSessionDescription, RTCIceCandidateInit};
 
 /// Message(s) to be exchanged via WebSocket between the signaling server and any peer.
 /// We assume 1 channel only, and each peer only has 1 SDP offer. Hopefully adding more than
@@ -26,4 +26,9 @@ pub enum WsExchangeMsg {
     },
     /// A peer just left
     LeavePeerId(Uuid),
+    IceCandidate {
+        send_to_id: Uuid,
+        answering_peer_id: Uuid,
+        candidate: RTCIceCandidateInit,
+    },
 }
