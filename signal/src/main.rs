@@ -2,6 +2,7 @@
 #![allow(unused)]
 use clap::Parser;
 use common::WsExchangeMsg;
+use dashmap::DashMap;
 use futures_util::{
     SinkExt, future,
     stream::{StreamExt, TryStreamExt},
@@ -78,11 +79,11 @@ async fn handle_connection(
     // there shouldn't be *that* many signals, right?
     let (tx, mut rx) = mpsc::channel::<WsExchangeMsg>(16);
     let mut uuid = Uuid::new_v4();
-    while PEER_UUID_AND_SENDER.read().await.get(&uuid).is_some() {
+    while PEER_UUID_AND_SENDER.get(&uuid).is_some() {
         uuid = Uuid::new_v4();
     }
-    PEER_UUID_AND_SENDER.write().await.insert(uuid, tx);
-    PEER_ADDR_AND_UUID.write().await.insert(addr, uuid);
+    PEER_UUID_AND_SENDER.insert(uuid, tx);
+    PEER_ADDR_AND_UUID.insert(addr, uuid);
     log::info!("Peer created: {uuid}");
 
     // then send the peer its PeerID.
@@ -96,14 +97,9 @@ async fn handle_connection(
 
     // the current peer receives Peer IDs of all other peers.
     // All other peers receive the current peer's ID.
-    for kv in PEER_UUID_AND_SENDER
-        .read()
-        .await
-        .iter()
-        .filter(|kv| kv.0 != &uuid)
-    {
+    for kv in PEER_UUID_AND_SENDER.iter().filter(|kv| kv.key() != &uuid) {
         let msg_to_others = WsExchangeMsg::NewPeer { peer_id: uuid };
-        let msg_to_self = WsExchangeMsg::ExistingPeer { peer_id: *kv.0 };
+        let msg_to_self = WsExchangeMsg::ExistingPeer { peer_id: *kv.key() };
 
         let send_to_self = match serde_json::to_string(&msg_to_self) {
             Ok(ret) => ret,
@@ -137,10 +133,10 @@ async fn handle_connection(
                 }
             }
         }
-        match kv.1.send(msg_to_others).await {
+        match kv.value().send(msg_to_others).await {
             Ok(()) => {}
             Err(e) => {
-                log::warn!("Cannot send {uuid} to {}: {e}", kv.0);
+                log::warn!("Cannot send {uuid} to {}: {e}", kv.key());
                 // TODO: we shouldn't just log and do nothing else for this error.
                 continue;
             }
@@ -181,16 +177,15 @@ async fn handle_connection(
                     answering_peer_id,
                     ..
                 } => {
-                    let read_lock = PEER_UUID_AND_SENDER.read().await;
                     log::info!("SDP exchange from {send_to_id} to {answering_peer_id}");
-                    if read_lock.get(&answering_peer_id).is_none() {
+                    if PEER_UUID_AND_SENDER.get(&answering_peer_id).is_none() {
                         log::warn!(
                             "Answering peer {answering_peer_id} does not exist (anymore). Skipping..."
                         );
                         continue;
                     }
 
-                    let send_to_kv = match read_lock.get(&send_to_id) {
+                    let send_to_kv = match PEER_UUID_AND_SENDER.get(&send_to_id) {
                         Some(kv) => kv,
                         None => {
                             log::warn!(
@@ -247,19 +242,14 @@ async fn handle_connection(
 
     // notify other peers that this peer is done and is quitting.
     log::info!("Trying to remove {}...", *uuid);
-    for recp in PEER_UUID_AND_SENDER
-        .read()
-        .await
-        .iter()
-        .filter(|kv| kv.0 != &*uuid)
-    {
+    for recp in PEER_UUID_AND_SENDER.iter().filter(|kv| kv.key() != &*uuid) {
         let msg = WsExchangeMsg::LeavePeerId(*uuid);
-        match recp.1.send(msg).await {
+        match recp.value().send(msg).await {
             Ok(()) => {
-                log::debug!("Sent remove signal of {} to {}", uuid, recp.0);
+                log::debug!("Sent remove signal of {} to {}", uuid, recp.key());
             }
             Err(e) => {
-                log::debug!("Send leaving ID to {} ignored: {e}", recp.0);
+                log::debug!("Send leaving ID to {} ignored: {e}", recp.key());
             }
         }
     }
@@ -270,10 +260,8 @@ async fn handle_connection(
     log::info!(
         "Remaining peers: {:?}",
         PEER_UUID_AND_SENDER
-            .read()
-            .await
             .iter()
-            .map(|kv| *kv.0)
+            .map(|kv| *kv.key())
             .collect::<Vec<_>>()
     );
 
@@ -283,12 +271,12 @@ async fn handle_connection(
 /// Remove the peer with the specified address.
 async fn remove_peer_addr(addr: &SocketAddr) {
     // `cloned` in hopes we drop the lock ASAP.
-    let uuid = PEER_ADDR_AND_UUID.read().await.get(&addr).cloned();
+    let uuid = PEER_ADDR_AND_UUID.get(&addr).map(|opt| opt.value().clone());
     if let Some(uuid) = uuid {
-        PEER_UUID_AND_SENDER.write().await.remove(&uuid);
+        PEER_UUID_AND_SENDER.remove(&uuid);
         // drop borrow
         let uuid = 0;
-        PEER_ADDR_AND_UUID.write().await.remove(&addr);
+        PEER_ADDR_AND_UUID.remove(&addr);
     }
 }
 
@@ -300,7 +288,6 @@ struct Opts {
     host: String,
 }
 
-static PEER_UUID_AND_SENDER: LazyLock<RwLock<HashMap<Uuid, mpsc::Sender<WsExchangeMsg>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-static PEER_ADDR_AND_UUID: LazyLock<RwLock<HashMap<SocketAddr, Uuid>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+static PEER_UUID_AND_SENDER: LazyLock<DashMap<Uuid, mpsc::Sender<WsExchangeMsg>>> =
+    LazyLock::new(DashMap::new);
+static PEER_ADDR_AND_UUID: LazyLock<DashMap<SocketAddr, Uuid>> = LazyLock::new(DashMap::new);
