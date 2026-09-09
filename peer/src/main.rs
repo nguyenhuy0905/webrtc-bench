@@ -214,6 +214,7 @@ async fn handle_message(
                 return Ok(());
             }
             finish_configure_peer_connection(answering_peer_id, sdp, outgoing.clone()).await?;
+            log::info!("PeerConnection with {answering_peer_id} fully done!");
         }
         WsExchangeMsg::LeavePeerId(leaving_peer_id) => {
             log::info!("Peer {leaving_peer_id} leaving");
@@ -385,11 +386,10 @@ async fn finish_configure_peer_connection(
     };
     log::trace!("Checking setup stage...");
     match setup_stage {
-        PeerSetupStage::Done => Err("Peer {peer_id} is already set up!".into()),
+        PeerSetupStage::Done => return Err("Peer {peer_id} is already set up!".into()),
         PeerSetupStage::WaitingAnswer => {
             peer_conn.set_remote_description(sdp).await.map_err(|e| e.to_string())?;
             log::info!("Set up PeerConnection with {peer_id}");
-            Ok(())
         }
         PeerSetupStage::WaitingOffer => {
             peer_conn.set_remote_description(sdp).await.map_err(|e| e.to_string())?;
@@ -406,9 +406,11 @@ async fn finish_configure_peer_connection(
             }).await {
                 return Err(e.to_string());
             }
-            Ok(())
         }
     }
+    OTHER_PEERS.get_mut(&peer_id).map(|mut kv| kv.value_mut().1 = PeerSetupStage::Done);
+
+    Ok(())
 }
 
 /// This peer's own UUID. We'll only receive this after asking the signaling server to join.
@@ -444,12 +446,12 @@ struct WebRtcHandler {
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for WebRtcHandler {
     async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
-        log::info!(
-            "WIP: do something with new ice candidate: {:?} {}:{}",
-            event.candidate.typ,
-            event.candidate.address,
-            event.candidate.port
-        );
+        // log::info!(
+        //     "WIP: do something with new ice candidate: {:?} {}:{}",
+        //     event.candidate.typ,
+        //     event.candidate.address,
+        //     event.candidate.port
+        // );
         match event.candidate.to_json() {
             Ok(candidate_init) => {
                 if let Err(e) = self
