@@ -266,26 +266,27 @@ async fn create_empty_peer_connection(
         other_peer_id: peer_id,
         ws_out_tx: outgoing,
     });
+    // set up the media engine and registry
     let mut media_engine = MediaEngine::default();
-    media_engine
-        .register_default_codecs()
-        .map_err(|e| e.to_string());
-    // let video_codec = RTCRtpCodecParameters {
-    //     rtp_codec: RTCRtpCodec {
-    //         mime_type: MIME_TYPE_H264.to_owned(),
-    //         clock_rate: 90_000,
-    //         channels: 0,
-    //         // what does this mean? I dunno.
-    //         sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-    //             .to_owned(),
-    //         rtcp_feedback: vec![],
-    //     },
-    //     // h264 or something...
-    //     payload_type: 102,
-    // };
-    // media_engine
-    //     .register_codec(video_codec, RtpCodecKind::Video)
-    //     .map_err(|e| e.to_string())?;
+    let video_codec = RTCRtpCodecParameters {
+        rtp_codec: RTCRtpCodec {
+            mime_type: MIME_TYPE_H264.to_owned(),
+            clock_rate: 90_000,
+            channels: 0,
+            // what does this mean? I dunno.
+            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                .to_owned(),
+            rtcp_feedback: vec![],
+        },
+        // h264 or something...
+        payload_type: 102,
+    };
+    if let Err(e) = media_engine
+        .register_codec(video_codec, RtpCodecKind::Video)
+    {
+        log::error!("Cannot register H264 video codec: {e}");
+        return Err(e.to_string());
+    }
     let registry = match register_default_interceptors(Registry::new(), &mut media_engine) {
         Ok(reg) => reg,
         Err(e) => {
