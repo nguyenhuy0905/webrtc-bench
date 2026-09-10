@@ -1,8 +1,10 @@
 #![allow(unused)]
 // game plan here:
-// 0. set up some sort of signaling server. Of course.
-// 1. find a way for the peers to ping the signaling server.
-// 1.1 by "ping" I mean send/recv SDPs.
+// 0. set up some sort of signaling server. Of course. [UPDATE: DONE]
+// 1. find a way for the peers to ping the signaling server. [UPDATE: DONE]
+// 1.1 by "ping" I mean send/recv SDPs. [UPDATE: DONE]
+// 2. create a track from a local H.264 file.
+//   - currently we are using a data channel to force the PeerConnection to go through.
 
 // So, `matchbox` turned out to not be such a bright idea.
 // I'll make my own WebSocket (building from `tokio-tungstenite`) then
