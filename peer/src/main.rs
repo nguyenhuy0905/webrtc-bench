@@ -13,8 +13,8 @@ use clap::Parser;
 use common::WsExchangeMsg;
 use dashmap::DashMap;
 use futures_util::{
-    stream::{SplitSink, SplitStream, StreamExt},
     SinkExt,
+    stream::{SplitSink, SplitStream, StreamExt},
 };
 use rtc::{
     peer_connection::configuration::media_engine::MIME_TYPE_H264,
@@ -23,20 +23,19 @@ use rtc::{
 use std::sync::{Arc, LazyLock};
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, broadcast, Mutex, OnceCell},
+    sync::{Mutex, OnceCell, broadcast, mpsc},
 };
 use tokio_tungstenite::{
-    tungstenite::{error::Error as TungsteniteError, protocol::Message},
     MaybeTlsStream, WebSocketStream,
+    tungstenite::{error::Error as TungsteniteError, protocol::Message},
 };
 use uuid::Uuid;
 use webrtc::{
     data_channel::{DataChannel, DataChannelEvent},
     peer_connection::{
-        register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
-        PeerConnectionEventHandler, RTCConfiguration, RTCConfigurationBuilder,
-        RTCIceGatheringState, RTCIceServer, RTCPeerConnectionIceEvent, RTCSessionDescription,
-        Registry,
+        MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
+        RTCConfiguration, RTCConfigurationBuilder, RTCIceGatheringState, RTCIceServer,
+        RTCPeerConnectionIceEvent, RTCSessionDescription, Registry, register_default_interceptors,
     },
     runtime::Runtime,
 };
@@ -65,16 +64,6 @@ async fn main_async() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     let (write_stream, mut read_stream) = ws_stream.split();
-
-    // 0.0 <C-c> handler, so that the web socket properly closes
-    // This is a broadcast, so that we can handle <C-c> cleanup (e.g. close all peer connections).
-    // Eh, that's a TODO... for our purpose, we can spin up a track, and read from a video file, and
-    // when the file ends, nuke the stream.
-    let (ctrlc_tx, mut ctrlc_rx) = broadcast::channel::<()>(1);
-    ctrlc::set_handler(move || {
-        let _ = ctrlc_tx.send(());
-    })
-    .map_err(|e| e.to_string())?;
 
     // 0.1 configure media engine.
     // We can't really do much else if this fails...
@@ -107,10 +96,9 @@ async fn main_async() -> Result<(), String> {
     // 2. For each `ExistingPeer`, this peer is the offerer. And for each `NewPeer`, this peer is
     //    the answerer. `NewPeer` *can* override existing peer.
 
-    tokio::spawn(handle_signal(read_stream, write_stream));
+    handle_signal(read_stream, write_stream).await?;
 
-    ctrlc_rx.recv().await;
-
+    close_peer_connections().await;
     log::info!("WebSocket connection with signaling server closed");
 
     Ok(())
@@ -139,54 +127,75 @@ async fn handle_signal(
         }
     });
 
-    while let Some(msg) = read_stream.next().await {
-        // convert message from Result<Message, TungsteniteError> to WsExchangeMsg.
-        let msg = match msg {
-            Ok(msg) => msg,
-            Err(e) => {
-                match e {
-                    TungsteniteError::ConnectionClosed => {
-                        // can't recover...
-                        log::warn!("Signaling connection closed!");
-                        break;
-                    }
-                    TungsteniteError::Io(io_err) => {
-                        // can't recover...
-                        log::error!("I/O error: {io_err}");
-                        break;
-                    }
-                    _ => {
-                        log::warn!("WebSocket error ignored: {e}");
-                        continue;
+    let og = outgoing.clone();
+    let signal_loop = async move {
+        let og = og.clone();
+        while let Some(msg) = read_stream.next().await {
+            // convert message from Result<Message, TungsteniteError> to WsExchangeMsg.
+            let msg = match msg {
+                Ok(msg) => msg,
+                Err(e) => {
+                    match e {
+                        TungsteniteError::ConnectionClosed => {
+                            // can't recover...
+                            log::warn!("Signaling connection closed!");
+                            break;
+                        }
+                        TungsteniteError::Io(io_err) => {
+                            // can't recover...
+                            log::error!("I/O error: {io_err}");
+                            break;
+                        }
+                        _ => {
+                            log::warn!("WebSocket error ignored: {e}");
+                            continue;
+                        }
                     }
                 }
-            }
-        };
-        // make sure message is sort-of valid
-        let msg = match msg.to_text() {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("Non-text message? {e}");
-                continue;
-            }
-        };
-        let msg: WsExchangeMsg = match serde_json::from_str(msg) {
-            Ok(ret) => ret,
-            Err(e) => {
-                log::warn!("Cannot understand message {msg}: {e}");
-                continue;
-            }
-        };
-        log::trace!("Received message: {msg:?}");
+            };
+            // make sure message is sort-of valid
+            let msg = match msg.to_text() {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("Non-text message? {e}");
+                    continue;
+                }
+            };
+            let msg: WsExchangeMsg = match serde_json::from_str(msg) {
+                Ok(ret) => ret,
+                Err(e) => {
+                    log::warn!("Cannot understand message {msg}: {e}");
+                    continue;
+                }
+            };
+            log::trace!("Received message: {msg:?}");
 
-        let og = outgoing.clone();
-        // so that we can go back to processing messages right away.
-        tokio::spawn(async move {
-            if let Err(e) = handle_message(msg, og).await {
-                log::warn!("Handle message error: {e}");
-            }
-        });
+            let og = og.clone();
+            // so that we can go back to processing messages right away.
+            tokio::spawn(async move {
+                if let Err(e) = handle_message(msg, og).await {
+                    log::warn!("Handle message error: {e}");
+                }
+            });
+        }
+    };
+    let wait_for_ctrlc = async {
+        let mut ctrlc_rx = CTRLC_BROADCAST.subscribe();
+        ctrlc_rx.recv().await;
+    };
+
+    tokio::select! {
+        _ = signal_loop => {
+            log::info!("Signaling socket closed!");
+        }
+        _ = wait_for_ctrlc => {
+            log::info!("Received C-c.");
+        }
     }
+
+    // be graceful
+    outgoing.send(WsExchangeMsg::LeavePeerId(*SELF_UUID.get().unwrap())).await;
+
     Ok(())
 }
 
@@ -216,7 +225,6 @@ async fn handle_message(
             answering_peer_id,
             sdp,
         } => {
-            log::warn!("Add SDP from {answering_peer_id}. This part of the code is bugged");
             if send_to_id != *SELF_UUID.get().unwrap() {
                 log::warn!("Received a message destined to {send_to_id}");
                 return Ok(());
@@ -226,7 +234,10 @@ async fn handle_message(
         }
         WsExchangeMsg::LeavePeerId(leaving_peer_id) => {
             log::info!("Peer {leaving_peer_id} leaving");
-            OTHER_PEERS.remove(&leaving_peer_id);
+            if let Some(kv) = OTHER_PEERS.remove(&leaving_peer_id) {
+                kv.1.0.close().await;
+                log::debug!("Closed {leaving_peer_id}'s connection");
+            }
         }
         WsExchangeMsg::IceCandidate {
             send_to_id,
@@ -274,16 +285,15 @@ async fn create_empty_peer_connection(
             clock_rate: 90_000,
             channels: 0,
             // what does this mean? I dunno.
-            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-                .to_owned(),
+            // sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+            //     .to_owned(),
+            sdp_fmtp_line: "".to_string(),
             rtcp_feedback: vec![],
         },
         // h264 or something...
         payload_type: 102,
     };
-    if let Err(e) = media_engine
-        .register_codec(video_codec, RtpCodecKind::Video)
-    {
+    if let Err(e) = media_engine.register_codec(video_codec, RtpCodecKind::Video) {
         log::error!("Cannot register H264 video codec: {e}");
         return Err(e.to_string());
     }
@@ -316,9 +326,8 @@ async fn create_empty_peer_connection(
 
 /// (Half)-Configures and adds an existing peer to OTHER_PEERS table.
 /// Half-configure because we still need to wait for an offer from the other peer.
-/// After the peer is added (a.k.a. after `await`ing on this function finishes), this PeerConnection
-/// will send an SDP offer to the signaling server, delivered to the other peer, then the other peer
-/// should send back an answer...
+/// After the connection is added (a.k.a. after `await`ing on this function finishes), it waits for
+/// an offer from the other peer.
 async fn add_existing_peer(
     peer_id: Uuid,
     outgoing: mpsc::Sender<WsExchangeMsg>,
@@ -341,9 +350,8 @@ async fn add_existing_peer(
 
 /// (Half)-Configures and adds a new peer to OTHER_PEERS table. This PeerConnection has its offer
 /// set as remote description, and sends its offer via `outgoing`.
+///
 /// Half-configure because we still need to wait for an answer from the other peer.
-/// After the peer is added (a.k.a. after `await`ing on this function finishes), this PeerConnection
-/// will
 async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>) -> Result<(), String> {
     let peer_conn = create_empty_peer_connection(peer_id, outgoing.clone()).await?;
     log::trace!("Created empty peer connection for {peer_id}");
@@ -420,6 +428,14 @@ async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>) -> R
     Ok(())
 }
 
+/// When this function is called, the PeerConnection of `peer_id` should have been half-set-up.
+/// The PeerConnection to that peer will be fully set up (assuming no error occurs) according to the
+/// `PeerSetupStage` it's in upon calling this function.
+/// # Parameters
+/// - `peer_id`: UUID of the peer.
+/// - `sdp`: The SDP received from the specified peer.
+/// - `outgoing`: a Sender to send messages to the signaling server. Think ICE candidate that the
+/// other peer should know about.
 async fn finish_configure_peer_connection(
     peer_id: Uuid,
     sdp: RTCSessionDescription,
@@ -473,6 +489,18 @@ async fn finish_configure_peer_connection(
     Ok(())
 }
 
+/// For each PeerConnection in `OTHER_PEERS`, call `close` on them.
+async fn close_peer_connections() {
+    for mut kv in OTHER_PEERS.iter_mut() {
+        if let Err(e) = kv.value_mut().0.close().await {
+            log::error!(
+                "Error trying to close connection to {} manually: {e}",
+                kv.key()
+            );
+        }
+    }
+}
+
 /// This peer's own UUID. We'll only receive this after asking the signaling server to join.
 static SELF_UUID: OnceCell<Uuid> = OnceCell::const_new();
 /// We got stuff to send, we send to each of them.
@@ -499,6 +527,16 @@ static RUNTIME: LazyLock<Arc<tokio::runtime::Runtime>> = LazyLock::new(|| {
             .unwrap(),
     )
 });
+/// <C-c> signal.
+static CTRLC_BROADCAST: LazyLock<broadcast::Sender<()>> = LazyLock::new(|| {
+    let (ctrlc_tx, _) = broadcast::channel::<()>(1);
+    let ctrlc_tx_ret = ctrlc_tx.clone();
+    ctrlc::set_handler(move || {
+        let _ = ctrlc_tx.send(());
+    })
+    .unwrap();
+    ctrlc_tx_ret
+});
 
 /// We need this to see how we should set local and remote descriptions during
 /// `finish_configure_peer_connection`.
@@ -509,14 +547,18 @@ enum PeerSetupStage {
     Done,
 }
 
+/// Handler to use for a PeerConnection.
 struct WebRtcHandler {
     runtime: Arc<tokio::runtime::Runtime>,
     other_peer_id: Uuid,
+    /// There are some signaling messages we want delivered to the other peer, e.g. when this peer
+    /// gets a new ICE candidate.
     ws_out_tx: mpsc::Sender<WsExchangeMsg>,
 }
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for WebRtcHandler {
     async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
+        // basically send the ICE candidate to the other peer via the signaling server.
         match event.candidate.to_json() {
             Ok(candidate_init) => {
                 if let Err(e) = self
@@ -539,11 +581,8 @@ impl PeerConnectionEventHandler for WebRtcHandler {
         }
     }
 
-    async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
-        log::debug!("gathering state: {state}");
-    }
-
     async fn on_data_channel(&self, channel: Arc<dyn DataChannel>) {
+        // currently, keeps the data channel in use, so that it doesn't just disappear.
         let id = channel.id();
         let label = match channel.label().await {
             Ok(l) => l,
@@ -555,6 +594,7 @@ impl PeerConnectionEventHandler for WebRtcHandler {
         log::info!("On channel {label}-{id}");
 
         // so that the channel doesn't just close
+        let other_peer_id = self.other_peer_id;
         RUNTIME.spawn(async move {
             let label = match channel.label().await {
                 Ok(l) => l,

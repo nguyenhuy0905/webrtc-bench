@@ -11,7 +11,7 @@ use serde_json::error::Category;
 use std::{net::SocketAddr, pin::Pin, sync::LazyLock};
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::mpsc,
+    sync::{mpsc, broadcast},
 };
 use tokio_tungstenite::tungstenite::{error::Error as TungsteniteError, protocol::Message};
 use uuid::Uuid;
@@ -20,6 +20,9 @@ use uuid::Uuid;
 // - "channel" is a broadcast. Peers subscribe to the broadcast. They can recv
 // notifications (in the form of SDP offers) when they first join the channel,
 // or when a new peer join.
+
+// Unlike the peers, once the signaling server is down, nothing else can be done, so we don't have
+// to be so graceful when the signaling server receives a Ctrl+C.
 
 // TODO: I dunno if this code can handle timeout...
 
@@ -237,6 +240,28 @@ async fn handle_connection(
                         }
                     }
                 }
+                &WsExchangeMsg::LeavePeerId(uuid) => {
+                    // remove peer first...
+                    let remove_uuid_check = PEER_ADDR_AND_UUID.get(&addr);
+                    match remove_uuid_check {
+                        None => {
+                            log::warn!("Peer {} doesn't exist (anymore)", uuid);
+                            continue;
+                        }
+                        Some(remove_uuid_check) if *remove_uuid_check.value() != uuid => {
+                            log::warn!("Expecting to remove {}, got {}", *remove_uuid_check.value(), uuid);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    remove_peer_addr(&addr);
+                    // then forward the message to every one else
+                    for recp in PEER_UUID_AND_SENDER.iter() {
+                        recp.value().send(WsExchangeMsg::LeavePeerId(uuid)).await;
+                    }
+                    // and end it all
+                    break;
+                }
                 _ => {
                     log::warn!("Received wrong type of message: {msg:?}");
                     continue;
@@ -244,7 +269,6 @@ async fn handle_connection(
             }
         }
     };
-    tokio::pin!(broadcast_incoming);
 
     let recv_from_others = async move {
         while let Some(msg) = rx.recv().await {
@@ -264,7 +288,6 @@ async fn handle_connection(
             outgoing.send(Message::from(send_msg)).await;
         }
     };
-    tokio::pin!(recv_from_others);
 
     tokio::select! {
         _ = broadcast_incoming => {
@@ -290,7 +313,6 @@ async fn handle_connection(
     }
     // and remove this peer from the list
     remove_peer_addr(&addr).await;
-    // this actually never prints...
     log::info!("Peer {} removed", *uuid);
     log::info!(
         "Remaining peers: {:?}",
