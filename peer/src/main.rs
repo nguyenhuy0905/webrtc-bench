@@ -13,29 +13,46 @@ use clap::Parser;
 use common::WsExchangeMsg;
 use dashmap::DashMap;
 use futures_util::{
-    SinkExt,
     stream::{SplitSink, SplitStream, StreamExt},
+    SinkExt,
 };
 use rtc::{
+    media::{io::h26x_reader::sample_reader::H26xSampleReader, Sample},
     peer_connection::configuration::media_engine::MIME_TYPE_H264,
-    rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind},
+    rtp_transceiver::{
+        rtp_sender::{
+            RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+            RtpCodecKind,
+        },
+        PayloadType,
+    },
 };
-use std::sync::{Arc, LazyLock};
+use std::{
+    fs::File,
+    io::BufReader,
+    sync::{Arc, LazyLock, OnceLock},
+    time::{Duration, Instant},
+};
 use tokio::{
     net::TcpStream,
-    sync::{Mutex, OnceCell, broadcast, mpsc},
+    sync::{broadcast, mpsc, Mutex, OnceCell},
 };
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream,
     tungstenite::{error::Error as TungsteniteError, protocol::Message},
+    MaybeTlsStream, WebSocketStream,
 };
 use uuid::Uuid;
 use webrtc::{
     data_channel::{DataChannel, DataChannelEvent},
+    media_stream::{
+        track_local::static_sample::TrackLocalStaticSample, track_remote::TrackRemote,
+        MediaStreamTrack, Track,
+    },
     peer_connection::{
-        MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
-        RTCConfiguration, RTCConfigurationBuilder, RTCIceGatheringState, RTCIceServer,
-        RTCPeerConnectionIceEvent, RTCSessionDescription, Registry, register_default_interceptors,
+        register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
+        PeerConnectionEventHandler, RTCConfiguration, RTCConfigurationBuilder,
+        RTCIceGatheringState, RTCIceServer, RTCPeerConnectionIceEvent, RTCSessionDescription,
+        Registry,
     },
     runtime::Runtime,
 };
@@ -58,6 +75,9 @@ fn main() {
 async fn main_async() -> Result<(), String> {
     env_logger::init();
     let args = Opts::parse();
+
+    // initialize some stuff
+    VIDEO_FILE_NAME.set(args.video_file);
 
     // connect to signaling server
     let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{}", args.host))
@@ -194,7 +214,9 @@ async fn handle_signal(
     }
 
     // be graceful
-    outgoing.send(WsExchangeMsg::LeavePeerId(*SELF_UUID.get().unwrap())).await;
+    outgoing
+        .send(WsExchangeMsg::LeavePeerId(*SELF_UUID.get().unwrap()))
+        .await;
 
     Ok(())
 }
@@ -235,7 +257,7 @@ async fn handle_message(
         WsExchangeMsg::LeavePeerId(leaving_peer_id) => {
             log::info!("Peer {leaving_peer_id} leaving");
             if let Some(kv) = OTHER_PEERS.remove(&leaving_peer_id) {
-                kv.1.0.close().await;
+                kv.1 .0.close().await;
                 log::debug!("Closed {leaving_peer_id}'s connection");
             }
         }
@@ -271,7 +293,7 @@ async fn handle_message(
 async fn create_empty_peer_connection(
     peer_id: Uuid,
     outgoing: mpsc::Sender<WsExchangeMsg>,
-) -> Result<impl PeerConnection, String> {
+) -> Result<(impl PeerConnection, mpsc::Sender<()>), String> {
     let handler = Arc::new(WebRtcHandler {
         runtime: RUNTIME.clone(),
         other_peer_id: peer_id,
@@ -279,21 +301,7 @@ async fn create_empty_peer_connection(
     });
     // set up the media engine and registry
     let mut media_engine = MediaEngine::default();
-    let video_codec = RTCRtpCodecParameters {
-        rtp_codec: RTCRtpCodec {
-            mime_type: MIME_TYPE_H264.to_owned(),
-            clock_rate: 90_000,
-            channels: 0,
-            // what does this mean? I dunno.
-            // sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-            //     .to_owned(),
-            sdp_fmtp_line: "".to_string(),
-            rtcp_feedback: vec![],
-        },
-        // h264 or something...
-        payload_type: 102,
-    };
-    if let Err(e) = media_engine.register_codec(video_codec, RtpCodecKind::Video) {
+    if let Err(e) = media_engine.register_codec(VIDEO_CODEC.clone(), RtpCodecKind::Video) {
         log::error!("Cannot register H264 video codec: {e}");
         return Err(e.to_string());
     }
@@ -305,6 +313,8 @@ async fn create_empty_peer_connection(
             return Err(e.to_string());
         }
     };
+
+    // gotta add all the tracks before I send the peer rolling
     let peer_conn = match PeerConnectionBuilder::new()
         .with_configuration(PEER_CONF.clone())
         .with_media_engine(media_engine.clone())
@@ -321,7 +331,73 @@ async fn create_empty_peer_connection(
             return Err(e.to_string());
         }
     };
-    Ok(peer_conn)
+
+    // add the video track
+
+    // TODO: SSRC collision technically can happen.
+    let ssrc = rand::random::<u32>();
+    // create the track to send video
+    let video_track = Arc::new(
+        match TrackLocalStaticSample::new(MediaStreamTrack::new(
+            // TODO: these, as suggested by the specs, should be UUIDs.
+            // stream ID
+            "video-stream-1".to_string(),
+            // track ID
+            "video-track-1".to_string(),
+            // label
+            "Video track".to_string(),
+            RtpCodecKind::Video,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(ssrc),
+                    ..Default::default()
+                },
+                // why do I have to repeat myself here...
+                codec: VIDEO_CODEC.rtp_codec.clone(),
+                ..Default::default()
+            }],
+        )) {
+            Ok(track) => track,
+            Err(e) => {
+                // most likely error on my end
+                log::error!("Cannot create video track: {e}");
+                return Err(e.to_string());
+            }
+        },
+    );
+    let sender = match peer_conn.add_track(video_track.clone()).await {
+        Ok(sender) => sender,
+        Err(e) => {
+            log::error!("Cannot add track: {e}");
+            return Err(e.to_string());
+        }
+    };
+
+    let (start_stream_tx, mut start_stream_rx) = mpsc::channel::<()>(1);
+
+    // check negotiated payload type
+    let payload_type = sender
+        .get_parameters()
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|negotiate| {
+            negotiate
+                .rtp_parameters
+                .codecs
+                .first()
+                .map(|codec| codec.payload_type)
+                .ok_or_else(|| "no negotiated codec!".to_string())
+        })?;
+    // then spawn a stream sending video
+    tokio::spawn(async move {
+        start_stream_rx.recv().await;
+        log::info!("Start playing file from {}", VIDEO_FILE_NAME.get().unwrap());
+        if let Err(e) = stream_video(video_track, payload_type).await {
+            log::error!("Cannot stream video: {e}");
+        }
+    });
+
+    Ok((peer_conn, start_stream_tx))
 }
 
 /// (Half)-Configures and adds an existing peer to OTHER_PEERS table.
@@ -332,10 +408,17 @@ async fn add_existing_peer(
     peer_id: Uuid,
     outgoing: mpsc::Sender<WsExchangeMsg>,
 ) -> Result<(), String> {
-    let peer_conn = create_empty_peer_connection(peer_id, outgoing).await?;
+    let (peer_conn, start_stream_tx) = create_empty_peer_connection(peer_id, outgoing).await?;
     log::trace!("Created empty peer connection for {peer_id}");
 
-    match OTHER_PEERS.insert(peer_id, (Arc::new(peer_conn), PeerSetupStage::WaitingOffer)) {
+    match OTHER_PEERS.insert(
+        peer_id,
+        (
+            Arc::new(peer_conn),
+            PeerSetupStage::WaitingOffer,
+            start_stream_tx,
+        ),
+    ) {
         Some(_) => {
             log::warn!(
                 "Peer ID {peer_id} already exists, overwriting and waiting for offer from peer...",
@@ -353,17 +436,9 @@ async fn add_existing_peer(
 ///
 /// Half-configure because we still need to wait for an answer from the other peer.
 async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>) -> Result<(), String> {
-    let peer_conn = create_empty_peer_connection(peer_id, outgoing.clone()).await?;
+    let (peer_conn, start_stream_tx) =
+        create_empty_peer_connection(peer_id, outgoing.clone()).await?;
     log::trace!("Created empty peer connection for {peer_id}");
-
-    let data_channel = match peer_conn.create_data_channel("data", None).await {
-        Ok(channel) => channel,
-        Err(e) => {
-            log::error!("Failed to create data channel: {e}");
-            // TODO: really, we should have a retry queue or something...
-            return Err(e.to_string());
-        }
-    };
 
     let offer = peer_conn
         .create_offer(None)
@@ -388,7 +463,11 @@ async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>) -> R
 
     match OTHER_PEERS.insert(
         peer_id,
-        (Arc::new(peer_conn), PeerSetupStage::WaitingAnswer),
+        (
+            Arc::new(peer_conn),
+            PeerSetupStage::WaitingAnswer,
+            start_stream_tx,
+        ),
     ) {
         Some(_) => {
             log::warn!(
@@ -399,31 +478,6 @@ async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>) -> R
             log::info!("Created PeerConnection for {peer_id}, waiting for answer from peer...",);
         }
     }
-
-    // so that the channel doesn't just close
-    RUNTIME.spawn(async move {
-        let label = match data_channel.label().await {
-            Ok(l) => l,
-            Err(e) => {
-                log::error!("Failed to get data channel label: {e}");
-                return;
-            }
-        };
-        let id = data_channel.id();
-        while let Some(event) = data_channel.poll().await {
-            match event {
-                DataChannelEvent::OnOpen => {
-                    log::info!("Data channel {label}-{id} opened. Kept open just so WebRTC doesn't scream error");
-                }
-                DataChannelEvent::OnClose => {
-                    log::info!("Data channel {label}-{id} closed");
-                }
-                _ => {
-                    log::debug!("Got data channel event {event:?}");
-                }
-            }
-        }
-    });
 
     Ok(())
 }
@@ -436,6 +490,8 @@ async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>) -> R
 /// - `sdp`: The SDP received from the specified peer.
 /// - `outgoing`: a Sender to send messages to the signaling server. Think ICE candidate that the
 /// other peer should know about.
+///
+/// UPDATE: this function also configures a video track to send to the other end.
 async fn finish_configure_peer_connection(
     peer_id: Uuid,
     sdp: RTCSessionDescription,
@@ -484,7 +540,54 @@ async fn finish_configure_peer_connection(
     }
     OTHER_PEERS
         .get_mut(&peer_id)
-        .map(|mut kv| kv.value_mut().1 = PeerSetupStage::Done);
+        .map(|mut kv| {kv.value_mut().1 = PeerSetupStage::Done; kv.value_mut().2.try_send(());});
+
+    Ok(())
+}
+
+/// We have the video file, we have the track. We stream.
+async fn stream_video(
+    video_track: Arc<TrackLocalStaticSample>,
+    payload_type: PayloadType,
+) -> Result<(), String> {
+    let file = File::open(VIDEO_FILE_NAME.get().unwrap()).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(file);
+    // really, you must've had SSRC here already
+    let ssrc = *video_track.ssrcs().await.first().unwrap();
+    // the number is 2^20, the bool means it's not H265
+    let mut video_reader = H26xSampleReader::new(reader, 1_048_576, false);
+    // we only need 30fps, so don't go overboard.
+    let mut tick = tokio::time::interval(H26X_FRAME_DURATION);
+    // let mut instant = Instant::now();
+    // let mut timestamp: u32 = rand::random();
+    loop {
+        let sample = match video_reader.next_sample() {
+            Ok(sample) => sample,
+            Err(e) => {
+                log::info!("All video frames parsed and sent: {e}");
+                break;
+            }
+        };
+
+        if let Err(e) = video_track
+            .sample_writer(ssrc, payload_type)
+            .write_sample(&Sample {
+                data: sample.data,
+                duration: if sample.timed {
+                    H26X_FRAME_DURATION
+                } else {
+                    Duration::ZERO
+                },
+                ..Default::default()
+            })
+            .await
+        {
+            log::warn!("Error sending: {e}");
+        };
+        if sample.timed {
+            tick.tick().await;
+        }
+    }
 
     Ok(())
 }
@@ -505,8 +608,9 @@ async fn close_peer_connections() {
 static SELF_UUID: OnceCell<Uuid> = OnceCell::const_new();
 /// We got stuff to send, we send to each of them.
 /// And if one leaves, we remove that one's peer connection.
-static OTHER_PEERS: LazyLock<DashMap<Uuid, (Arc<dyn PeerConnection>, PeerSetupStage)>> =
-    LazyLock::new(DashMap::new);
+static OTHER_PEERS: LazyLock<
+    DashMap<Uuid, (Arc<dyn PeerConnection>, PeerSetupStage, mpsc::Sender<()>)>,
+> = LazyLock::new(DashMap::new);
 /// THe configuration shared by all peers.
 static PEER_CONF: LazyLock<RTCConfiguration> = LazyLock::new(|| {
     RTCConfigurationBuilder::new()
@@ -537,6 +641,24 @@ static CTRLC_BROADCAST: LazyLock<broadcast::Sender<()>> = LazyLock::new(|| {
     .unwrap();
     ctrlc_tx_ret
 });
+/// ~30fps
+static H26X_FRAME_DURATION: Duration = Duration::from_millis(33);
+static VIDEO_CODEC: LazyLock<RTCRtpCodecParameters> = LazyLock::new(|| RTCRtpCodecParameters {
+    rtp_codec: RTCRtpCodec {
+        mime_type: MIME_TYPE_H264.to_owned(),
+        clock_rate: 90_000,
+        channels: 0,
+        // what does this mean? I dunno.
+        sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+            .to_owned(),
+        // sdp_fmtp_line: "".to_string(),
+        rtcp_feedback: vec![],
+    },
+    // h264 or something...
+    payload_type: 102,
+});
+/// I love global states
+static VIDEO_FILE_NAME: OnceLock<String> = OnceLock::new();
 
 /// We need this to see how we should set local and remote descriptions during
 /// `finish_configure_peer_connection`.
@@ -580,43 +702,7 @@ impl PeerConnectionEventHandler for WebRtcHandler {
             }
         }
     }
-
-    async fn on_data_channel(&self, channel: Arc<dyn DataChannel>) {
-        // currently, keeps the data channel in use, so that it doesn't just disappear.
-        let id = channel.id();
-        let label = match channel.label().await {
-            Ok(l) => l,
-            Err(e) => {
-                log::error!("Failed to get data channel label: {e}");
-                return;
-            }
-        };
-        log::info!("On channel {label}-{id}");
-
-        // so that the channel doesn't just close
-        let other_peer_id = self.other_peer_id;
-        RUNTIME.spawn(async move {
-            let label = match channel.label().await {
-                Ok(l) => l,
-                Err(e) => {
-                    log::error!("Failed to get data channel label: {e}");
-                    return;
-                }
-            };
-            let id = channel.id();
-            while let Some(event) = channel.poll().await {
-                match event {
-                    DataChannelEvent::OnOpen => {
-                        log::info!("Data channel {label}-{id} opened. Kept open just so WebRTC doesn't scream error");
-                    }
-                    DataChannelEvent::OnClose => {
-                        log::info!("Data channel {label}-{id} closed");
-                    }
-                    _ => {
-                        log::debug!("Got data channel event {event:?}");
-                    }
-                }
-            }
-        });
+    async fn on_track(&self, track: Arc<dyn TrackRemote>) {
+        log::info!("On track with {}", self.other_peer_id);
     }
 }

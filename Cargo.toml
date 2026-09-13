@@ -22,3 +22,4 @@ dashmap = { version = "6.2", features = ["inline"] }
 tokio-tungstenite = "0.30"
 uuid = { version = "1", features = ["v4", "serde"] }
 ctrlc = "3"
+rand = "0.10"

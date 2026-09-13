@@ -12,3 +12,4 @@
 # ctags
 /tags
 **.h264
+/**.log
