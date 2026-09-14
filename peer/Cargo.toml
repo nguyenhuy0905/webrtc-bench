@@ -19,3 +19,4 @@ futures-util.workspace = true
 common = { path = "../common" }
 ctrlc.workspace = true
 rand.workspace = true
+anyhow.workspace = true

@@ -1,6 +1,6 @@
 # Tasks and to-dos
 ## Signal server
 - DONE! Save for the ICE candidate exchange part...
-## Peers
-- Currently, when receiving a NewPeer signal, *then* an Sdp signal, the peer
-freezes. And probably times out the WebSocket it has with the server.
+## Rookie mistakes
+- So, adding a track to the peer connection *will* fire the negotiation-needed
+event. So, my way of doing stuff, is very wrong... Huge rewrite incoming...
