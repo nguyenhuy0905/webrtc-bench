@@ -11,6 +11,10 @@
 
 // TODO: move sending SDP offer/answer to `on_negotiation_needed`.
 
+mod globals;
+mod handle;
+
+use anyhow::Context;
 use clap::Parser;
 use common::WsExchangeMsg;
 use dashmap::DashMap;
@@ -18,6 +22,7 @@ use futures_util::{
     stream::{SplitSink, SplitStream, StreamExt},
     SinkExt,
 };
+use globals::{OTHER_PEERS, PEER_CONF, RUNTIME, SELF_UUID, VIDEO_CODEC};
 use rtc::{
     media::{io::h26x_reader::sample_reader::H26xSampleReader, Sample},
     peer_connection::configuration::media_engine::MIME_TYPE_H264,
@@ -81,8 +86,7 @@ async fn main_async() -> anyhow::Result<()> {
     // connect to signaling server
     // this will tell the signaling server that this peer wants to join the channel. Currently,
     // there's only one channel to join.
-    let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{}", args.host))
-        .await?;
+    let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{}", args.host)).await?;
     let (write_stream, mut read_stream) = ws_stream.split();
 
     // then we can initialize our PeerID.
@@ -98,7 +102,7 @@ async fn main_async() -> anyhow::Result<()> {
     )
     .expect("Cannot parse first WebSocket response to WsExchangeMsg");
 
-    handle_signal(read_stream, write_stream).await?;
+    tokio::spawn(handle_signal(read_stream, write_stream));
 
     // I'm pretty sure WebSocket is a reliable stream.
     if let WsExchangeMsg::JoinPeerId(self_id) = self_id {
@@ -113,11 +117,138 @@ async fn main_async() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Grab the WebSocket read and write streams and handle any message that needs to be sent/recv.
 async fn handle_signal(
-    mut read_stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+    read_stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     mut write_stream: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
 ) -> anyhow::Result<()> {
+    let (outgoing, mut incoming) = mpsc::channel::<WsExchangeMsg>(4);
+
+    // send stuff to the server. A.k.a simply forward what is put into `outgoing`.
+    tokio::spawn(async move {
+        while let Some(msg) = incoming.recv().await {
+            // this shouldn't fail...
+            let msg_str = serde_json::to_string(&msg).unwrap();
+            if let Err(e) = write_stream.send(Message::from(msg_str)).await {
+                log::warn!("Error sending message: {e}");
+            }
+        }
+    });
+
+    outgoing
+        .send(WsExchangeMsg::LeavePeerId(*SELF_UUID.get().unwrap()))
+        .await;
+
     Ok(())
+}
+
+/// Converts message from Result<Message, TungsteniteError> to WsExchangeMsg.
+fn convert_message(msg: Result<Message, TungsteniteError>) -> anyhow::Result<WsExchangeMsg> {
+    msg.context("WebSocket error")?
+        .to_text()
+        .context("Converting to text message")
+        .and_then(|msg| serde_json::from_str(msg).context("Converting text message to JSON"))
+}
+
+async fn signal_loop(
+    mut read_stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+) -> anyhow::Result<()> {
+    while let Some(msg) = read_stream.next().await {
+        let msg = match convert_message(msg) {
+            Ok(msg) => msg,
+            Err(e) => {
+                log::warn!("Skipping message: {e}");
+                continue;
+            }
+        };
+        log::trace!("Received message: {msg:?}");
+
+        match msg {
+            WsExchangeMsg::NewPeer(peer_id) => {
+                assert!(peer_id != *SELF_UUID.get().unwrap());
+                log::warn!("TODO: add new peer");
+            }
+            WsExchangeMsg::LeavePeerId(peer_id) => {
+                log::info!("Peer {peer_id} leaving");
+                if let Some(kv) = OTHER_PEERS.remove(&peer_id) {
+                    kv.1 .0.close().await;
+                    log::debug!("Closed {peer_id}'s connection");
+                }
+            }
+            WsExchangeMsg::IceCandidate {
+                from_id,
+                to_id,
+                candidate,
+            } => {
+                let peer_conn = match check_destination(to_id, from_id) {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        log::warn!("Cannot add ICE candidate: {e}");
+                        continue;
+                    }
+                };
+                log::info!("ICE candidate added: {candidate:?}");
+                if let Err(e) = peer_conn
+                    .add_ice_candidate(candidate)
+                    .await
+                    .context("Failed to add ICE candidate")
+                {
+                    log::warn!("{e}");
+                    continue;
+                }
+            }
+            _ => {
+                log::warn!("Unexpected message: {msg:?}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// If the self_id matches `SELF_UUID` and other_id exists, returns Ok(other-peer-conn).
+fn check_destination(self_id: Uuid, other_id: Uuid) -> anyhow::Result<Arc<dyn PeerConnection>> {
+    if self_id != *SELF_UUID.get().expect("SELF_UUID should already be set!") {
+        anyhow::bail!("Received a message destined to {self_id}");
+    }
+    OTHER_PEERS
+        .get(&other_id)
+        .map(|kv| kv.value().0.clone())
+        .ok_or_else(|| anyhow::anyhow!("Peer {other_id} doesn't exist"))
+}
+
+/// (Half)-Configures and adds an existing peer to OTHER_PEERS table.
+/// Sends the offer from this peer...
+async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>) -> anyhow::Result<()> {
+    let peer_conn = create_empty_peer_conn(peer_id, outgoing).await?;
+    // TODO: add a media track. Then `on_negotiation_needed` will be triggered.
+    Ok(())
+}
+
+/// By "empty" I mean a peer connection that hasn't been bound to a local or remote SDP yet.
+/// Returns the peer connection if successful.
+async fn create_empty_peer_conn(
+    peer_id: Uuid,
+    outgoing: mpsc::Sender<WsExchangeMsg>,
+) -> anyhow::Result<impl PeerConnection> {
+    // set up the media engine and registry
+    let mut media_engine = MediaEngine::default();
+    media_engine
+        .register_codec(VIDEO_CODEC.clone(), RtpCodecKind::Video)
+        .context("Cannot register H264 codec")?;
+    let registry = register_default_interceptors(Registry::new(), &mut media_engine)
+        .context("Cannot register interceptor")?;
+
+    PeerConnectionBuilder::new()
+        .with_configuration(PEER_CONF.clone())
+        .with_media_engine(media_engine)
+        .with_interceptor_registry(registry)
+        .with_handler(Arc::new(handle::WebRtcHandler {
+            other_peer_id: peer_id,
+            ws_out_tx: outgoing,
+        })).with_udp_addrs(vec!["0.0.0.0:0"])
+        .build()
+        .await.context("Failed to create PeerConnection with {peer_id}")
 }
 
 // async fn main_async() -> Result<(), String> {
@@ -652,8 +783,6 @@ async fn handle_signal(
 //     }
 // }
 //
-/// This peer's own UUID. We'll only receive this after asking the signaling server to join.
-static SELF_UUID: OnceCell<Uuid> = OnceCell::const_new();
 // /// We got stuff to send, we send to each of them.
 // /// And if one leaves, we remove that one's peer connection.
 // static OTHER_PEERS: LazyLock<
@@ -669,16 +798,6 @@ static SELF_UUID: OnceCell<Uuid> = OnceCell::const_new();
 //         }])
 //         .build()
 // });
-/// The tokio runtime
-static RUNTIME: LazyLock<Arc<tokio::runtime::Runtime>> = LazyLock::new(|| {
-    Arc::new(
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .name("tokio-runtime")
-            .build()
-            .unwrap(),
-    )
-});
 // /// <C-c> signal.
 // static CTRLC_BROADCAST: LazyLock<broadcast::Sender<()>> = LazyLock::new(|| {
 //     let (ctrlc_tx, _) = broadcast::channel::<()>(1);
@@ -708,54 +827,3 @@ static RUNTIME: LazyLock<Arc<tokio::runtime::Runtime>> = LazyLock::new(|| {
 // /// I love global states
 // static VIDEO_FILE_NAME: OnceLock<String> = OnceLock::new();
 //
-// /// We need this to see how we should set local and remote descriptions during
-// /// `finish_configure_peer_connection`.
-// #[derive(Clone, Copy)]
-// enum PeerSetupStage {
-//     WaitingOffer,
-//     WaitingAnswer,
-//     Done,
-// }
-//
-// /// Handler to use for a PeerConnection.
-// struct WebRtcHandler {
-//     runtime: Arc<tokio::runtime::Runtime>,
-//     other_peer_id: Uuid,
-//     /// There are some signaling messages we want delivered to the other peer, e.g. when this peer
-//     /// gets a new ICE candidate.
-//     ws_out_tx: mpsc::Sender<WsExchangeMsg>,
-// }
-// #[async_trait::async_trait]
-// impl PeerConnectionEventHandler for WebRtcHandler {
-//     async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
-//         // basically send the ICE candidate to the other peer via the signaling server.
-//         match event.candidate.to_json() {
-//             Ok(candidate_init) => {
-//                 if let Err(e) = self
-//                     .ws_out_tx
-//                     .send(WsExchangeMsg::IceCandidate {
-//                         send_to_id: self.other_peer_id,
-//                         answering_peer_id: *SELF_UUID
-//                             .get()
-//                             .expect("PEER_UUID should have been set!"),
-//                         candidate: candidate_init,
-//                     })
-//                     .await
-//                 {
-//                     log::error!("Cannot send ICE candidate: {e}");
-//                 }
-//             }
-//             Err(e) => {
-//                 log::error!("Cannot turn ICE candidate to JSON: {e}");
-//             }
-//         }
-//     }
-//
-//     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
-//         log::info!("On track with {}", self.other_peer_id);
-//     }
-//
-//     async fn on_negotiation_needed(&self) {
-//         println!("Negotiation with {} needed", self.other_peer_id);
-//     }
-// }

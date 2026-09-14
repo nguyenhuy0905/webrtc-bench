@@ -1,17 +1,19 @@
 //! Signaling server.
 #![allow(unused)]
+use anyhow::Context;
 use clap::Parser;
 use common::WsExchangeMsg;
 use dashmap::DashMap;
 use futures_util::{
-    SinkExt, future,
+    future,
     stream::{StreamExt, TryStreamExt},
+    SinkExt,
 };
 use serde_json::error::Category;
 use std::{net::SocketAddr, pin::Pin, sync::LazyLock};
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{mpsc, broadcast},
+    sync::{broadcast, mpsc},
 };
 use tokio_tungstenite::tungstenite::{error::Error as TungsteniteError, protocol::Message};
 use uuid::Uuid;
@@ -27,40 +29,26 @@ use uuid::Uuid;
 // TODO: I dunno if this code can handle timeout...
 
 #[tokio::main]
-async fn main() -> Result<(), String> {
+async fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args = Opts::parse();
 
-    let listener = match TcpListener::bind(args.host).await {
+    let listener = match TcpListener::bind(&args.host).await {
         Ok(lis) => lis,
-        Err(e) => return Err(format!("{e}")),
+        Err(e) => anyhow::bail!("Cannot bind to {}: {e}", &args.host),
     };
     log::info!(
         "Listening on {}",
         match listener.local_addr() {
-            Ok(addr) => Ok(addr),
-            Err(e) => Err(format!("{e}")),
-        }?
+            Ok(addr) => addr,
+            Err(e) => anyhow::bail!("Cannot retrieve listener's local address: {e}"),
+        }
     );
 
     while let Ok((stream, addr)) = listener.accept().await {
         tokio::spawn(async move {
-            match handle_connection(stream, addr).await {
-                Ok(()) => {}
-                Err(e) => match e {
-                    TungsteniteError::ConnectionClosed => {
-                        log::info!("Connection {addr} closed");
-                        remove_peer_addr(&addr).await;
-                    }
-                    TungsteniteError::AttackAttempt => {
-                        log::warn!("Attack attempt detected! Nuking the suspecting peer at once");
-                        remove_peer_addr(&addr).await;
-                    }
-                    _ => {
-                        log::warn!("Misc. error: {e}");
-                        remove_peer_addr(&addr).await;
-                    }
-                },
+            if let Err(e) = handle_connection(stream, addr).await {
+                log::error!("{e}");
             }
         });
     }
@@ -69,13 +57,12 @@ async fn main() -> Result<(), String> {
 }
 
 /// When this runs, it's probably a new peer's connecting...
-async fn handle_connection(
-    raw_stream: TcpStream,
-    addr: SocketAddr,
-) -> Result<(), TungsteniteError> {
+async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::Result<()> {
     log::info!("Incoming TCP connection from {addr}");
 
-    let ws_stream = tokio_tungstenite::accept_async(raw_stream).await?;
+    let ws_stream = tokio_tungstenite::accept_async(raw_stream)
+        .await
+        .context(format!("Cannot create WS connection for {addr}"))?;
     log::info!("WebSocket connection established for {addr}");
 
     // insert the new peer's info into the tables.
@@ -101,41 +88,8 @@ async fn handle_connection(
     // the current peer receives Peer IDs of all other peers.
     // All other peers receive the current peer's ID.
     for kv in PEER_UUID_AND_SENDER.iter().filter(|kv| kv.key() != &uuid) {
-        let msg_to_others = WsExchangeMsg::NewPeer { peer_id: uuid };
-        let msg_to_self = WsExchangeMsg::ExistingPeer { peer_id: *kv.key() };
+        let msg_to_others = WsExchangeMsg::NewPeer(uuid);
 
-        let send_to_self = match serde_json::to_string(&msg_to_self) {
-            Ok(ret) => ret,
-            Err(e) => {
-                log::error!("Cannot serialize message {msg_to_self:?}: {e}");
-                // TODO: we should retry, but the current peer and this peer cannot make
-                // a PeerConnection for now.
-                continue;
-            }
-        };
-
-        match outgoing.send(Message::from(send_to_self)).await {
-            Ok(()) => {}
-            Err(e) => {
-                match &e {
-                    TungsteniteError::ConnectionClosed => {
-                        log::warn!("Signaling connection closed!");
-                        // TODO: notify that this peer has left.
-                        return Err(e);
-                    }
-                    TungsteniteError::Io(io_err) => {
-                        log::error!("I/O error: {io_err}");
-                        // TODO: notify that this peer has left.
-                        return Err(e);
-                    }
-                    _ => {
-                        log::warn!("WebSocket error ignored: {e}");
-                        // TODO: retry instead of continue
-                        continue;
-                    }
-                }
-            }
-        }
         match kv.value().send(msg_to_others).await {
             Ok(()) => {}
             Err(e) => {
@@ -175,55 +129,43 @@ async fn handle_connection(
                 },
             };
             match &msg {
-                &WsExchangeMsg::Sdp {
-                    send_to_id,
-                    answering_peer_id,
-                    ..
-                } => {
-                    if PEER_UUID_AND_SENDER.get(&answering_peer_id).is_none() {
-                        log::warn!(
-                            "Answering peer {answering_peer_id} does not exist (anymore). Skipping..."
-                        );
+                &WsExchangeMsg::Offer { from_id, to_id, .. }
+                | &WsExchangeMsg::Answer { from_id, to_id, .. } => {
+                    log::trace!("SDP from {from_id} to {to_id}");
+                    if PEER_UUID_AND_SENDER.get(&from_id).is_none() {
+                        log::warn!("From-peer {from_id} does not exist (anymore). Skipping...");
                         continue;
                     }
-
-                    let send_to_kv = match PEER_UUID_AND_SENDER.get(&send_to_id) {
-                        Some(kv) => kv,
+                    match PEER_UUID_AND_SENDER.get(&to_id) {
+                        Some(kv) => {
+                            kv.value().send(msg).await.map_err(|e| {
+                                log::warn!("Cannot send offer to {to_id}...");
+                                e
+                            });
+                        }
                         None => {
-                            log::warn!(
-                                "Send-to peer {send_to_id} does not exist (anymore). Skipping..."
-                            );
-                            continue;
-                        }
-                    };
-                    // and forward the message...
-                    match send_to_kv.send(msg).await {
-                        Ok(()) => {
-                            log::info!("SDP exchanged from {send_to_id} to {answering_peer_id}");
-                        }
-                        Err(e) => {
-                            log::warn!("Cannot forward message to {send_to_id}: {e}");
+                            log::warn!("To-peer {to_id} does not exist (anymore). Skipping...");
                         }
                     }
                 }
                 &WsExchangeMsg::IceCandidate {
-                    send_to_id,
-                    answering_peer_id,
+                    from_id,
+                    to_id,
                     ..
                 } => {
                     // basically copy-paste of WsExchangeMsg::Sdp
-                    if PEER_UUID_AND_SENDER.get(&answering_peer_id).is_none() {
+                    if PEER_UUID_AND_SENDER.get(&from_id).is_none() {
                         log::warn!(
-                            "Answering peer {answering_peer_id} does not exist (anymore). Skipping..."
+                            "Answering peer {from_id} does not exist (anymore). Skipping..."
                         );
                         continue;
                     }
 
-                    let send_to_kv = match PEER_UUID_AND_SENDER.get(&send_to_id) {
+                    let send_to_kv = match PEER_UUID_AND_SENDER.get(&to_id) {
                         Some(kv) => kv,
                         None => {
                             log::warn!(
-                                "Send-to peer {send_to_id} does not exist (anymore). Skipping..."
+                                "Send-to peer {to_id} does not exist (anymore). Skipping..."
                             );
                             continue;
                         }
@@ -232,11 +174,11 @@ async fn handle_connection(
                     match send_to_kv.send(msg).await {
                         Ok(()) => {
                             log::info!(
-                                "ICE candidate exchanged from {send_to_id} to {answering_peer_id}"
+                                "ICE candidate exchanged from {from_id} to {to_id}"
                             );
                         }
                         Err(e) => {
-                            log::warn!("Cannot forward message to {send_to_id}: {e}");
+                            log::warn!("Cannot forward message to {to_id}: {e}");
                         }
                     }
                 }
@@ -249,7 +191,11 @@ async fn handle_connection(
                             continue;
                         }
                         Some(remove_uuid_check) if *remove_uuid_check.value() != uuid => {
-                            log::warn!("Expecting to remove {}, got {}", *remove_uuid_check.value(), uuid);
+                            log::warn!(
+                                "Expecting to remove {}, got {}",
+                                *remove_uuid_check.value(),
+                                uuid
+                            );
                             continue;
                         }
                         _ => {}
