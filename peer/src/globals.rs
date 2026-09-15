@@ -1,7 +1,7 @@
 //! I love global variables.
 
 use dashmap::DashMap;
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::{sync::{Arc, LazyLock, OnceLock}, time::Duration};
 use uuid::Uuid;
 use webrtc::peer_connection::PeerConnection;
 use rtc::{
@@ -9,6 +9,7 @@ use rtc::{
     rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters},
 };
 use webrtc::peer_connection::{RTCConfigurationBuilder, RTCConfiguration, RTCIceServer};
+use tokio::sync::{mpsc, broadcast, RwLock};
 
 /// We need this to see how we should set local and remote descriptions during
 /// `finish_configure_peer_connection`.
@@ -21,7 +22,8 @@ pub enum PeerSetupStage {
 
 /// To be allocated by the signaling server.
 pub static SELF_UUID: OnceLock<Uuid> = OnceLock::new();
-pub static OTHER_PEERS: LazyLock<DashMap<Uuid, (Arc<dyn PeerConnection>, PeerSetupStage)>> =
+/// (uuid, (peer-conn, setup-stage, notifier-to-start-video-stream))
+pub static OTHER_PEERS: LazyLock<DashMap<Uuid, (Arc<dyn PeerConnection>, RwLock<PeerSetupStage>, mpsc::Sender<()>)>> =
     LazyLock::new(DashMap::new);
 /// The tokio runtime
 pub static RUNTIME: LazyLock<Arc<tokio::runtime::Runtime>> = LazyLock::new(|| {
@@ -56,4 +58,18 @@ pub static PEER_CONF: LazyLock<RTCConfiguration> = LazyLock::new(|| {
             ..Default::default()
         }])
         .build()
+});
+/// ~30fps
+pub static H26X_FRAME_DURATION: Duration = Duration::from_millis(33);
+/// I love global states
+pub static VIDEO_FILE_NAME: OnceLock<String> = OnceLock::new();
+/// <C-c> signal.
+pub static CTRLC_BROADCAST: LazyLock<broadcast::Sender<()>> = LazyLock::new(|| {
+    let (ctrlc_tx, _) = broadcast::channel::<()>(1);
+    let ctrlc_tx_ret = ctrlc_tx.clone();
+    ctrlc::set_handler(move || {
+        let _ = ctrlc_tx.send(());
+    })
+    .unwrap();
+    ctrlc_tx_ret
 });
