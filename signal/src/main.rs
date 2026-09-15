@@ -1,21 +1,19 @@
 //! Signaling server.
-#![allow(unused)]
 use anyhow::Context;
 use clap::Parser;
 use common::WsExchangeMsg;
 use dashmap::DashMap;
 use futures_util::{
-    future,
-    stream::{StreamExt, TryStreamExt},
+    stream::{StreamExt},
     SinkExt,
 };
 use serde_json::error::Category;
 use std::{net::SocketAddr, pin::Pin, sync::LazyLock};
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{broadcast, mpsc},
+    sync::{mpsc},
 };
-use tokio_tungstenite::tungstenite::{error::Error as TungsteniteError, protocol::Message};
+use tokio_tungstenite::tungstenite::{protocol::Message};
 use uuid::Uuid;
 
 // Some terms I use a little loosely here:
@@ -83,7 +81,7 @@ async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::R
             serde_json::to_string(&WsExchangeMsg::JoinPeerId(uuid))
                 .expect("Cannot serialize JoinPeerId to JSON"),
         ))
-        .await;
+        .await?;
 
     // the current peer receives Peer IDs of all other peers.
     // All other peers receive the current peer's ID.
@@ -138,10 +136,10 @@ async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::R
                     }
                     match PEER_UUID_AND_SENDER.get(&to_id) {
                         Some(kv) => {
-                            kv.value().send(msg).await.map_err(|e| {
-                                log::warn!("Cannot send offer to {to_id}...");
-                                e
-                            });
+                            if let Err(e) = kv.value().send(msg).await {
+                                log::warn!("{e}");
+                                continue;
+                            }
                         }
                         None => {
                             log::warn!("To-peer {to_id} does not exist (anymore). Skipping...");
@@ -200,10 +198,13 @@ async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::R
                         }
                         _ => {}
                     }
-                    remove_peer_addr(&addr);
+                    remove_peer_addr(&addr).await;
                     // then forward the message to every one else
                     for recp in PEER_UUID_AND_SENDER.iter() {
-                        recp.value().send(WsExchangeMsg::LeavePeerId(uuid)).await;
+                        if let Err(e) = recp.value().send(WsExchangeMsg::LeavePeerId(uuid)).await {
+                            log::warn!("{e}");
+                            continue;
+                        }
                     }
                     // and end it all
                     break;
@@ -231,7 +232,9 @@ async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::R
                     }
                 },
             };
-            outgoing.send(Message::from(send_msg)).await;
+            if let Err(e) = outgoing.send(Message::from(send_msg)).await {
+                log::warn!("{e}");
+            }
         }
     };
 
@@ -277,8 +280,6 @@ async fn remove_peer_addr(addr: &SocketAddr) {
     let uuid = PEER_ADDR_AND_UUID.get(&addr).map(|opt| opt.value().clone());
     if let Some(uuid) = uuid {
         PEER_UUID_AND_SENDER.remove(&uuid);
-        // drop borrow
-        let uuid = 0;
         PEER_ADDR_AND_UUID.remove(&addr);
     }
 }

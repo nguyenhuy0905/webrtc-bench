@@ -15,8 +15,10 @@ use tokio::sync::{mpsc, broadcast, RwLock};
 /// `finish_configure_peer_connection`.
 #[derive(Clone, Copy)]
 pub enum PeerSetupStage {
+    #[allow(unused)]
     WaitingOffer,
     WaitingAnswer,
+    #[allow(unused)]
     Done,
 }
 

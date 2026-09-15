@@ -1,10 +1,8 @@
 use crate::globals::{OTHER_PEERS, SELF_UUID};
 use common::WsExchangeMsg;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use webrtc::{
-    media_stream::track_remote::TrackRemote,
     peer_connection::{PeerConnectionEventHandler, RTCPeerConnectionIceEvent},
 };
 
@@ -40,10 +38,10 @@ impl PeerConnectionEventHandler for WebRtcHandler {
         }
     }
 
-    async fn on_track(&self, track: Arc<dyn TrackRemote>) {
-        log::info!("On track with {}", self.other_peer_id);
-    }
-
+    // async fn on_track(&self, track: Arc<dyn TrackRemote>) {
+    //     log::info!("On track with {}", self.other_peer_id);
+    // }
+    //
     async fn on_negotiation_needed(&self) {
         log::info!("Negotiation with {} needed", self.other_peer_id);
         let Some(peer_conn) = OTHER_PEERS
@@ -68,11 +66,14 @@ impl PeerConnectionEventHandler for WebRtcHandler {
             return;
         }
 
-        self.ws_out_tx.send(WsExchangeMsg::Offer {
+        if let Err(e) = self.ws_out_tx.send(WsExchangeMsg::Offer {
             from_id: *SELF_UUID.get().unwrap(),
             to_id: self.other_peer_id,
             offer,
-        }).await;
+        }).await {
+            log::warn!("Cannot send offer to {}: {e}", self.other_peer_id);
+            return;
+        }
         log::info!("Sent offer to {}", self.other_peer_id);
     }
 }

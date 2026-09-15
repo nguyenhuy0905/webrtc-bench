@@ -1,4 +1,3 @@
-#![allow(unused)]
 // game plan here:
 // 0. set up some sort of signaling server. Of course. [UPDATE: DONE]
 // 1. find a way for the peers to ping the signaling server. [UPDATE: DONE]
@@ -17,7 +16,6 @@ mod handle;
 use anyhow::Context;
 use clap::Parser;
 use common::WsExchangeMsg;
-use dashmap::DashMap;
 use futures_util::{
     stream::{SplitSink, SplitStream, StreamExt},
     SinkExt,
@@ -28,10 +26,9 @@ use globals::{
 };
 use rtc::{
     media::{io::h26x_reader::sample_reader::H26xSampleReader, Sample},
-    peer_connection::configuration::media_engine::MIME_TYPE_H264,
     rtp_transceiver::{
         rtp_sender::{
-            RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+            RTCRtpCodingParameters, RTCRtpEncodingParameters,
             RtpCodecKind,
         },
         PayloadType,
@@ -40,12 +37,12 @@ use rtc::{
 use std::{
     fs::File,
     io::BufReader,
-    sync::{Arc, LazyLock, OnceLock},
-    time::{Duration, Instant},
+    sync::{Arc},
+    time::{Duration},
 };
 use tokio::{
     net::TcpStream,
-    sync::{broadcast, mpsc, Mutex, OnceCell, RwLock},
+    sync::{mpsc, RwLock},
 };
 use tokio_tungstenite::{
     tungstenite::{error::Error as TungsteniteError, protocol::Message},
@@ -53,18 +50,15 @@ use tokio_tungstenite::{
 };
 use uuid::Uuid;
 use webrtc::{
-    data_channel::{DataChannel, DataChannelEvent},
     media_stream::{
-        track_local::static_sample::TrackLocalStaticSample, track_remote::TrackRemote,
+        track_local::static_sample::TrackLocalStaticSample,
         MediaStreamTrack, Track,
     },
     peer_connection::{
         register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
-        PeerConnectionEventHandler, RTCConfiguration, RTCConfigurationBuilder,
-        RTCIceGatheringState, RTCIceServer, RTCPeerConnectionIceEvent, RTCSessionDescription,
+        RTCSessionDescription,
         Registry,
     },
-    runtime::Runtime,
 };
 
 #[derive(Parser, Debug)]
@@ -78,8 +72,8 @@ struct Opts {
     video_file: String,
 }
 
-fn main() {
-    RUNTIME.block_on(main_async());
+fn main() -> anyhow::Result<()> {
+    RUNTIME.block_on(main_async())
 }
 
 async fn main_async() -> anyhow::Result<()> {
@@ -87,7 +81,7 @@ async fn main_async() -> anyhow::Result<()> {
     let args = Opts::parse();
 
     // initialize some stuff
-    globals::VIDEO_FILE_NAME.set(args.video_file);
+    globals::VIDEO_FILE_NAME.get_or_init(|| args.video_file);
 
     // connect to signaling server
     // this will tell the signaling server that this peer wants to join the channel. Currently,
@@ -143,6 +137,7 @@ async fn handle_signal(
 
     let wait_for_ctrlc = async {
         let mut ctrlc_rx = CTRLC_BROADCAST.subscribe();
+        #[allow(unused)]
         ctrlc_rx.recv().await;
     };
     tokio::select! {
@@ -157,7 +152,7 @@ async fn handle_signal(
     // be graceful
     outgoing
         .send(WsExchangeMsg::LeavePeerId(*SELF_UUID.get().unwrap()))
-        .await;
+        .await?;
 
     Ok(())
 }
@@ -172,7 +167,7 @@ fn convert_message(msg: Result<Message, TungsteniteError>) -> anyhow::Result<WsE
 
 async fn signal_loop(
     mut read_stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
-    outgoing: mpsc::Sender<WsExchangeMsg>,
+    _outgoing: mpsc::Sender<WsExchangeMsg>,
 ) {
     while let Some(msg) = read_stream.next().await {
         let msg = match convert_message(msg) {
@@ -186,84 +181,89 @@ async fn signal_loop(
 
         match msg {
             WsExchangeMsg::NewPeer(peer_id) => {
-                assert!(peer_id != *SELF_UUID.get().unwrap());
-                // log::warn!("TODO: add new peer");
-                if let Err(e) = add_new_peer(peer_id, outgoing.clone(), None).await {
-                    log::warn!("Cannot add new peer {peer_id}: {e}");
-                }
-                log::info!("Peer {peer_id} added");
+                log::warn!("TODO: new peer {peer_id}");
+                // assert!(peer_id != *SELF_UUID.get().unwrap());
+                // // log::warn!("TODO: add new peer");
+                // if let Err(e) = add_new_peer(peer_id, outgoing.clone(), None).await {
+                //     log::warn!("Cannot add new peer {peer_id}: {e}");
+                // }
+                // log::info!("Peer {peer_id} added");
             }
             WsExchangeMsg::LeavePeerId(peer_id) => {
-                log::info!("Peer {peer_id} leaving");
-                if let Some(kv) = OTHER_PEERS.remove(&peer_id) {
-                    kv.1 .0.close().await;
-                    log::debug!("Closed {peer_id}'s connection");
-                }
+                log::warn!("TODO Peer {peer_id} leaving");
+                // if let Some(kv) = OTHER_PEERS.remove(&peer_id) {
+                //     kv.1 .0.close().await;
+                //     log::debug!("Closed {peer_id}'s connection");
+                // }
             }
             WsExchangeMsg::Offer {
                 from_id,
-                to_id,
-                offer,
+                ..
+                // to_id,
+                // offer,
             } => {
-                if to_id != *SELF_UUID.get().expect("SELF_UUID should already be set!") {
-                    log::warn!("Received a message destined to {to_id}");
-                    continue;
-                }
-                let Some(other_peer) = OTHER_PEERS.get(&from_id).map(|kv| kv.value().0.clone())
-                else {
-                    log::info!("Peer {from_id} doesn't exist, creating PeerConnection");
-                    if let Err(e) = add_new_peer(from_id, outgoing.clone(), Some(offer)).await {
-                        log::warn!("Cannot add offering peer {from_id}: {e}");
-                    }
-                    continue;
-                };
-                if let Err(e) = other_peer.set_remote_description(offer).await {
-                    log::warn!("Cannot set remote description for {from_id}: {e}");
-                    continue;
-                }
-                let answer = match other_peer.create_answer(None).await {
-                    Ok(ans) => ans,
-                    Err(e) => {
-                        log::warn!("Cannot create answer for {from_id}: {e}");
-                        continue;
-                    }
-                };
-                if let Err(e) = other_peer.set_local_description(answer.clone()).await {
-                    log::warn!("Cannot set local description for {from_id}: {e}");
-                    continue;
-                }
-                outgoing.send(WsExchangeMsg::Answer {
-                    from_id: to_id,
-                    to_id: from_id,
-                    answer,
-                });
-                log::info!("Added {from_id} offer, sending answer...");
+                log::warn!("TODO offer from {from_id}");
+                // if to_id != *SELF_UUID.get().expect("SELF_UUID should already be set!") {
+                //     log::warn!("Received a message destined to {to_id}");
+                //     continue;
+                // }
+                // let Some(other_peer) = OTHER_PEERS.get(&from_id).map(|kv| kv.value().0.clone())
+                // else {
+                //     log::info!("Peer {from_id} doesn't exist, creating PeerConnection");
+                //     if let Err(e) = add_new_peer(from_id, outgoing.clone(), Some(offer)).await {
+                //         log::warn!("Cannot add offering peer {from_id}: {e}");
+                //     }
+                //     continue;
+                // };
+                // if let Err(e) = other_peer.set_remote_description(offer).await {
+                //     log::warn!("Cannot set remote description for {from_id}: {e}");
+                //     continue;
+                // }
+                // let answer = match other_peer.create_answer(None).await {
+                //     Ok(ans) => ans,
+                //     Err(e) => {
+                //         log::warn!("Cannot create answer for {from_id}: {e}");
+                //         continue;
+                //     }
+                // };
+                // if let Err(e) = other_peer.set_local_description(answer.clone()).await {
+                //     log::warn!("Cannot set local description for {from_id}: {e}");
+                //     continue;
+                // }
+                // outgoing.send(WsExchangeMsg::Answer {
+                //     from_id: to_id,
+                //     to_id: from_id,
+                //     answer,
+                // }).await;
+                // log::info!("Added {from_id} offer, sending answer...");
             }
             WsExchangeMsg::Answer {
                 from_id,
-                to_id,
-                answer,
+                ..
+                // to_id,
+                // answer,
             } => {
-                if to_id != *SELF_UUID.get().expect("SELF_UUID should already be set!") {
-                    log::warn!("Received a message destined to {to_id}");
-                    continue;
-                }
-                let Some(mut kv) = OTHER_PEERS.get(&from_id) else {
-                    log::warn!("Peer {from_id} doesn't exist");
-                    continue;
-                };
-                if !matches!(*kv.value().1.read().await, PeerSetupStage::WaitingAnswer) {
-                    log::warn!("Peer {from_id} state isn't waiting-answer");
-                    continue;
-                }
-                if let Err(e) = kv.value().0.set_remote_description(answer).await {
-                    log::warn!("Cannot set remote description for {from_id}: {e}");
-                    continue;
-                }
-                *kv.value().1.write().await = PeerSetupStage::Done;
-                // start the stream, basically
-                kv.value().2.send(());
-                log::info!("Added {from_id} answer. Starting video...");
+                log::warn!("TODO answer from {from_id}");
+                // if to_id != *SELF_UUID.get().expect("SELF_UUID should already be set!") {
+                //     log::warn!("Received a message destined to {to_id}");
+                //     continue;
+                // }
+                // let Some(mut kv) = OTHER_PEERS.get(&from_id) else {
+                //     log::warn!("Peer {from_id} doesn't exist");
+                //     continue;
+                // };
+                // if !matches!(*kv.value().1.read().await, PeerSetupStage::WaitingAnswer) {
+                //     log::warn!("Peer {from_id} state isn't waiting-answer");
+                //     continue;
+                // }
+                // if let Err(e) = kv.value().0.set_remote_description(answer).await {
+                //     log::warn!("Cannot set remote description for {from_id}: {e}");
+                //     continue;
+                // }
+                // *kv.value().1.write().await = PeerSetupStage::Done;
+                // // start the stream, basically
+                // kv.value().2.send(());
+                // log::info!("Added {from_id} answer. Starting video...");
             }
             WsExchangeMsg::IceCandidate {
                 from_id,
@@ -308,6 +308,7 @@ fn check_destination(self_id: Uuid, other_id: Uuid) -> anyhow::Result<Arc<dyn Pe
 
 /// (Half)-Configures and adds an existing peer to OTHER_PEERS table.
 /// Returns a Sender that will be used to notify that the video should start
+#[allow(unused)]
 async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>, offer: Option<RTCSessionDescription>) -> anyhow::Result<()> {
     let peer_conn = Arc::new(create_empty_peer_conn(peer_id, outgoing.clone()).await?);
     if let Some(offer) = offer.clone() {
@@ -388,7 +389,7 @@ async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>, offe
             from_id: *SELF_UUID.get().unwrap(),
             to_id: peer_id,
             offer,
-        });
+        }).await;
     }
 
     Ok(())
@@ -396,6 +397,7 @@ async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>, offe
 
 /// By "empty" I mean a peer connection that hasn't been bound to a local or remote SDP yet.
 /// Returns the peer connection if successful.
+#[allow(unused)]
 async fn create_empty_peer_conn(
     peer_id: Uuid,
     outgoing: mpsc::Sender<WsExchangeMsg>,
@@ -458,7 +460,7 @@ async fn stream_video(
             })
             .await
         {
-            log::warn!("Error sending video");
+            log::warn!("Error sending video: {e}");
             break;
         };
         if sample.timed {
