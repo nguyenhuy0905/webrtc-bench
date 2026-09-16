@@ -17,3 +17,8 @@
 11. The recipient uses the signaling server to send the answer to the caller.
 12. The caller receives the answer.
 13. The caller calls RTCPeerConnection.setRemoteDescription() to set the answer as the remote description for its end of the call. It now knows the configuration of both peers. Media begins to flow as configured.
+
+## Almost there
+- The `on_track` event currently just spin-loop to hold on to the track, so
+that it doesn't err out trying to send the video. But, so far, video sending
+works well.

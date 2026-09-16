@@ -4,10 +4,12 @@ use dashmap::DashMap;
 use rtc::{
     peer_connection::configuration::media_engine::MIME_TYPE_H264,
     rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters},
+    // media::io::h26x_writer::H26xWriter,
 };
 use std::{
     sync::{atomic::AtomicBool, Arc, LazyLock, OnceLock},
     time::Duration,
+    // fs::File,
 };
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
@@ -33,10 +35,7 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
-    pub fn new(
-        conn: Arc<dyn PeerConnection>,
-        start_stream_tx: mpsc::Sender<()>,
-    ) -> Self {
+    pub fn new(conn: Arc<dyn PeerConnection>, start_stream_tx: mpsc::Sender<()>) -> Self {
         Self {
             conn,
             start_stream_tx,
@@ -84,6 +83,7 @@ pub static PEER_CONF: LazyLock<RTCConfiguration> = LazyLock::new(|| {
 pub static H26X_FRAME_DURATION: Duration = Duration::from_millis(33);
 /// I love global states
 pub static VIDEO_FILE_NAME: OnceLock<String> = OnceLock::new();
+// pub static VIDEO_SAVE_FILE: OnceLock<H26xWriter<File>> = OnceLock::new();
 /// <C-c> signal.
 pub static CTRLC_BROADCAST: LazyLock<broadcast::Sender<()>> = LazyLock::new(|| {
     let (ctrlc_tx, _) = broadcast::channel::<()>(1);

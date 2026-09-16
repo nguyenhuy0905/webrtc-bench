@@ -31,12 +31,7 @@ use rtc::{
         PayloadType,
     },
 };
-use std::{
-    fs::File,
-    io::BufReader,
-    sync::Arc,
-    time::Duration,
-};
+use std::{fs::File, io::BufReader, sync::Arc, time::Duration};
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_tungstenite::{
     tungstenite::{error::Error as TungsteniteError, protocol::Message},
@@ -61,6 +56,9 @@ struct Opts {
     /// Path to video file
     #[arg(short='p', long, default_value_t="input.h264".into())]
     video_file: String,
+    /// Save video to file
+    // #[arg(short='s', long)]
+    // save_to_file: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -170,6 +168,8 @@ async fn signal_loop(
         };
         log::trace!("Received message: {msg:?}");
 
+        // NOTE: it's normal to see ICE handling error message from one peer, due to remote
+        // connection not being added yet.
         if let Err(e) = handle_message(msg, outgoing.clone()).await {
             log::warn!("Error handling message: {e:?}");
         }
@@ -179,99 +179,160 @@ async fn signal_loop(
 /// Broken to a separate function so that I don't have to keep, `if Err(e) = ... {log();}`.
 async fn handle_message(
     msg: WsExchangeMsg,
-    _outgoing: mpsc::Sender<WsExchangeMsg>,
+    outgoing: mpsc::Sender<WsExchangeMsg>,
 ) -> anyhow::Result<()> {
     match msg {
         WsExchangeMsg::NewPeer(peer_id) => {
-            log::warn!("TODO: new peer {peer_id}");
+            let new_peer = Arc::new(
+                create_empty_peer_conn(peer_id, outgoing.clone())
+                    .await
+                    .with_context(|| format!("Cannot add new peer {peer_id}"))?,
+            );
+            let start_stream_tx = add_media_to_connection(new_peer.clone())
+                .await
+                .with_context(|| format!("Cannot add media to {peer_id}"))?;
+            OTHER_PEERS.insert(peer_id, PeerInfo::new(new_peer.clone(), start_stream_tx));
+
+            log::info!("Peer {peer_id} added! TODO send offer to peer");
+            let offer = new_peer
+                .create_offer(None)
+                .await
+                .with_context(|| format!("Cannot create offer for {peer_id}"))?;
+            new_peer
+                .set_local_description(offer)
+                .await
+                .with_context(|| {
+                    format!("Cannot set local description for peer connection with {peer_id}")
+                })?;
+            outgoing
+                .send(WsExchangeMsg::Sdp {
+                    // SAFETY: SELF_UUID is already initiated when connecting to signaling server.
+                    from_id: *SELF_UUID.get().unwrap(),
+                    to_id: peer_id,
+                    sdp: new_peer.local_description().await.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Cannot query local description for connection to {peer_id}"
+                        )
+                    })?,
+                })
+                .await
+                .with_context(|| format!("Cannot send offer to {peer_id}"))?;
         }
         WsExchangeMsg::LeavePeerId(peer_id) => {
             log::warn!("TODO Peer {peer_id} leaving");
         }
         WsExchangeMsg::Sdp {
             from_id,
-            ..
+            to_id,
+            sdp,
         } => {
-            log::warn!("TODO handle SDP from {from_id}");
+            if to_id != *SELF_UUID.get().unwrap() {
+                anyhow::bail!("Received SDP destined to {to_id}");
+            }
+            let sdp_type = sdp.sdp_type;
+            match sdp_type {
+                RTCSdpType::Offer => {
+                    const CONTEXT: &'static str = "Receive and handle SDP offer";
+                    log::warn!("TODO handle offer from {from_id}");
+                    if OTHER_PEERS.get(&from_id).is_some() {
+                        anyhow::bail!(
+                            "SDP offer: we don't support re-negotiation yet! From {from_id}"
+                        );
+                    }
+                    let other_peer = Arc::new(
+                        create_empty_peer_conn(from_id, outgoing.clone())
+                            .await
+                            .with_context(|| {
+                                format!("Cannot create empty peer connection for {from_id}")
+                            })
+                            .context(CONTEXT)?,
+                    );
+                    let start_stream_tx = add_media_to_connection(other_peer.clone())
+                        .await
+                        .with_context(|| format!("Cannot add media to connection with {from_id}"))
+                        .context(CONTEXT)?;
+                    other_peer
+                        .set_remote_description(sdp)
+                        .await
+                        .with_context(|| format!("Cannot set remote description from {from_id}"))
+                        .context(CONTEXT)?;
+                    OTHER_PEERS.insert(from_id, PeerInfo::new(other_peer.clone(), start_stream_tx));
+                    log::info!("Offering peer {from_id} added.");
+
+                    // generate answer and send back
+                    let answer = other_peer
+                        .create_answer(None)
+                        .await
+                        .with_context(|| format!("Cannot create answer for {from_id}"))
+                        .context(CONTEXT)?;
+                    other_peer
+                        .set_local_description(answer)
+                        .await
+                        .with_context(|| {
+                            format!("Cannot set local description for connection to {from_id}")
+                        })
+                        .context(CONTEXT)?;
+                    outgoing
+                        .send(WsExchangeMsg::Sdp {
+                            from_id: to_id,
+                            to_id: from_id,
+                            sdp: other_peer
+                                .local_description()
+                                .await
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                    "Cannot query local description for connection to {from_id}"
+                                )
+                                })
+                                .context(CONTEXT)?,
+                        })
+                        .await
+                        .with_context(|| format!("Cannot send answer to {from_id}"))?;
+                }
+                RTCSdpType::Answer => {
+                    const CONTEXT: &'static str = "Receive and handle answer";
+                    log::warn!("TODO handle answer from {from_id}");
+                    let other_peer = OTHER_PEERS
+                        .get(&from_id)
+                        .with_context(||format!("Peer {from_id} doesn't exist (yet)"))
+                        .context(CONTEXT)?;
+                    other_peer
+                        .value()
+                        .conn
+                        .set_remote_description(sdp)
+                        .await
+                        .context(CONTEXT)
+                        .with_context(|| {
+                            format!("Cannot set remote description for connection to {from_id}")
+                        })?;
+                }
+                _ => {
+                    log::warn!("SDP type {sdp_type:?} not supported");
+                }
+            }
         }
         WsExchangeMsg::IceCandidate {
-            ..
+            from_id,
+            to_id,
+            candidate,
         } => {
-            log::warn!("TODO handle ICE candidate");
+            // log::warn!("TODO handle ICE candidate from {from_id}");
+            if to_id != *SELF_UUID.get().unwrap() {
+                anyhow::bail!("Received ICE candidate destined to {to_id}");
+            }
+            let peer_info = OTHER_PEERS.get(&from_id).ok_or_else(|| {
+                anyhow::anyhow!("ICE candidate: Peer {from_id} doesn't exist (yet)")
+            })?;
+            peer_info
+                .conn
+                .add_ice_candidate(candidate)
+                .await
+                .with_context(|| format!("Cannot add ICE candidate from {from_id}"))?;
         }
         _ => {
             anyhow::bail!("Unexpected message: {msg:?}");
         }
     }
-
-    Ok(())
-}
-
-#[allow(unused)]
-/// Creates a peer with the video track added, and adds to OTHER_PEERS table.
-async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>) -> anyhow::Result<()> {
-    let peer_conn = Arc::new(create_empty_peer_conn(peer_id, outgoing.clone()).await?);
-    // TODO: add a media track. Then `on_negotiation_needed` will be triggered.
-    // TODO: SSRC collision can technically happen...
-    let ssrc = rand::random::<u32>();
-    let video_track = Arc::new(
-        TrackLocalStaticSample::new(MediaStreamTrack::new(
-            // TODO: these, as suggested by the specs, should be UUIDs.
-            // stream ID
-            "video-stream-1".to_string(),
-            // track ID
-            "video-track-1".to_string(),
-            // label
-            "Video track".to_string(),
-            RtpCodecKind::Video,
-            vec![RTCRtpEncodingParameters {
-                rtp_coding_parameters: RTCRtpCodingParameters {
-                    ssrc: Some(ssrc),
-                    ..Default::default()
-                },
-                // why do I have to repeat myself here...
-                codec: VIDEO_CODEC.rtp_codec.clone(),
-                ..Default::default()
-            }],
-        ))
-        .context("Cannot create video track")?,
-    );
-    // notify when to start a stream
-    let (start_stream_tx, mut start_stream_rx) = mpsc::channel::<()>(1);
-
-    OTHER_PEERS.insert(
-        peer_id,
-        PeerInfo::new(peer_conn.clone(), start_stream_tx.clone()),
-    );
-
-    log::debug!("Adding track...");
-    let sender = peer_conn
-        .add_track(video_track.clone())
-        .await
-        .context("Cannot add track to peer connection")?;
-
-    let payload_type = sender
-        .get_parameters()
-        .await
-        .map_err(|e| anyhow::anyhow!(e))
-        .and_then(|negotiate| {
-            negotiate
-                .rtp_parameters
-                .codecs
-                .first()
-                .map(|codec| codec.payload_type)
-                .ok_or_else(|| anyhow::anyhow!("No negotiated codec!"))
-        })?;
-
-    // then spawn a stream sending video
-    tokio::spawn(async move {
-        if let Some(()) = start_stream_rx.recv().await {
-            log::info!("Start playing file from {}", VIDEO_FILE_NAME.get().unwrap());
-            if let Err(e) = stream_video(video_track, payload_type).await {
-                log::error!("Cannot stream video: {e:?}");
-            }
-        }
-    });
 
     Ok(())
 }
@@ -348,10 +409,65 @@ async fn stream_video(
     Ok(())
 }
 
-/// Determine if this peer should be polite with the other peer.
-/// Polite peers don't ignore other peers' offers. So, if both ends try to give offer, the
-/// polite peer drops its offer.
-/// SAFETY: SELF_UUID must already be set before calling.
-pub fn is_polite(other_id: Uuid) -> bool {
-    return *SELF_UUID.get().unwrap() < other_id;
+/// Returns, if success, the notification channel to start the video stream
+async fn add_media_to_connection(
+    peer_conn: Arc<dyn PeerConnection>,
+) -> anyhow::Result<mpsc::Sender<()>> {
+    let ssrc = rand::random::<u32>();
+    let video_track = Arc::new(
+        TrackLocalStaticSample::new(MediaStreamTrack::new(
+            // TODO: these, as suggested by the specs, should be UUIDs.
+            // stream ID
+            "video-stream-1".to_string(),
+            // track ID
+            "video-track-1".to_string(),
+            // label
+            "Video track".to_string(),
+            RtpCodecKind::Video,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(ssrc),
+                    ..Default::default()
+                },
+                // why do I have to repeat myself here...
+                codec: VIDEO_CODEC.rtp_codec.clone(),
+                ..Default::default()
+            }],
+        ))
+        .with_context(|| format!("Cannot create video track"))?,
+    );
+
+    // notify when to start a stream
+    let (start_stream_tx, mut start_stream_rx) = mpsc::channel::<()>(1);
+
+    log::debug!("Adding track...");
+    let sender = peer_conn
+        .add_track(video_track.clone())
+        .await
+        .context("Cannot add track to peer connection")?;
+
+    let payload_type = sender
+        .get_parameters()
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .and_then(|negotiate| {
+            negotiate
+                .rtp_parameters
+                .codecs
+                .first()
+                .map(|codec| codec.payload_type)
+                .ok_or_else(|| anyhow::anyhow!("No negotiated codec!"))
+        })?;
+
+    // then spawn a stream sending video
+    tokio::spawn(async move {
+        if let Some(()) = start_stream_rx.recv().await {
+            log::info!("Start playing file from {}", VIDEO_FILE_NAME.get().unwrap());
+            if let Err(e) = stream_video(video_track, payload_type).await {
+                log::error!("Cannot stream video: {e:?}");
+            }
+        }
+    });
+
+    Ok(start_stream_tx)
 }
