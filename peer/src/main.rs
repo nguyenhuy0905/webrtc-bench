@@ -34,7 +34,7 @@ use rtc::{
 use std::{
     fs::File,
     io::BufReader,
-    sync::{atomic::Ordering, Arc},
+    sync::Arc,
     time::Duration,
 };
 use tokio::{net::TcpStream, sync::mpsc};
@@ -179,103 +179,105 @@ async fn signal_loop(
 /// Broken to a separate function so that I don't have to keep, `if Err(e) = ... {log();}`.
 async fn handle_message(
     msg: WsExchangeMsg,
-    outgoing: mpsc::Sender<WsExchangeMsg>,
+    _outgoing: mpsc::Sender<WsExchangeMsg>,
 ) -> anyhow::Result<()> {
     match msg {
         WsExchangeMsg::NewPeer(peer_id) => {
             log::warn!("TODO: new peer {peer_id}");
-            if peer_id == *SELF_UUID.get().unwrap() {
-                anyhow::bail!("Repeated peer ID {peer_id}");
-            }
-            add_new_peer(peer_id, outgoing.clone())
-                .await
-                .context("Cannot add new peer {peer_id}")?;
-            log::info!("Peer {peer_id} added");
-
-            // SAFETY: we just added this peer in `add_new_peer`.
-            let peer_info = OTHER_PEERS.get(&peer_id).unwrap();
-            let conn = &peer_info.conn;
-            let offer = conn
-                .create_offer(None)
-                .await
-                .context("Cannot create offer to send to {peer_id}")?;
-            conn.set_local_description(offer)
-                .await
-                .context("Cannot set local description for {peer_id}")?;
-
-            // SAFETY: we just set local description above
-            let sdp = conn.local_description().await.unwrap();
-            outgoing
-                .send(WsExchangeMsg::Sdp {
-                    // SAFETY: set when first opening signaling connection
-                    from_id: *SELF_UUID.get().unwrap(),
-                    to_id: peer_id,
-                    sdp,
-                })
-                .await
-                .context("Cannot send offer to {peer_id}")?;
-
-            log::info!("Sent offer to {peer_id}, waiting answer");
+            // if peer_id == *SELF_UUID.get().unwrap() {
+            //     anyhow::bail!("Repeated peer ID {peer_id}");
+            // }
+            // add_new_peer(peer_id, outgoing.clone())
+            //     .await
+            //     .context("Cannot add new peer {peer_id}")?;
+            // log::info!("Peer {peer_id} added");
+            //
+            // // SAFETY: we just added this peer in `add_new_peer`.
+            // let peer_info = OTHER_PEERS.get(&peer_id).unwrap();
+            // let conn = &peer_info.conn;
+            // let offer = conn
+            //     .create_offer(None)
+            //     .await
+            //     .context("Cannot create offer to send to {peer_id}")?;
+            // conn.set_local_description(offer)
+            //     .await
+            //     .context("Cannot set local description for {peer_id}")?;
+            //
+            // // SAFETY: we just set local description above
+            // let sdp = conn.local_description().await.unwrap();
+            // outgoing
+            //     .send(WsExchangeMsg::Sdp {
+            //         // SAFETY: set when first opening signaling connection
+            //         from_id: *SELF_UUID.get().unwrap(),
+            //         to_id: peer_id,
+            //         sdp,
+            //     })
+            //     .await
+            //     .context("Cannot send offer to {peer_id}")?;
+            //
+            // log::info!("Sent offer to {peer_id}, waiting answer");
         }
         WsExchangeMsg::LeavePeerId(peer_id) => {
             log::warn!("TODO Peer {peer_id} leaving");
-            if let Some(kv) = OTHER_PEERS.remove(&peer_id) {
-                kv.1.conn
-                    .close()
-                    .await
-                    .context("Cannot close {peer_id} connection")?;
-                log::info!("Closed {peer_id}'s connection");
-            }
+            // if let Some(kv) = OTHER_PEERS.remove(&peer_id) {
+            //     kv.1.conn
+            //         .close()
+            //         .await
+            //         .context("Cannot close {peer_id} connection")?;
+            //     log::info!("Closed {peer_id}'s connection");
+            // }
         }
         WsExchangeMsg::Sdp {
             from_id,
-            to_id,
-            sdp,
+            ..
+            // to_id,
+            // sdp,
         } => {
-            // SAFETY: should already be set when initiating signaling connection
-            if *SELF_UUID.get().unwrap() != to_id {
-                anyhow::bail!("Received SDP destined for {to_id}");
-            }
-            // TODO: if peer is not found, create the peer.
-            let kv = if let Some(kv) = OTHER_PEERS.get(&from_id) {
-                kv
-            } else {
-                log::debug!("Peer {from_id} not found. Creating the peer connection...");
-                add_new_peer(from_id, outgoing.clone())
-                    .await
-                    .context("Cannot add offering/answering peer {from_id}")?;
-                // SAFETY: we just added the peer.
-                OTHER_PEERS.get(&from_id).unwrap()
-            };
-            let peer_info = kv.value();
-
-            // grabbed from https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Perfect_negotiation
-            let ready_for_offer = !peer_info.making_offer.load(Ordering::Acquire)
-                && (*peer_info.signal_state.read().await == RTCSignalingState::Stable
-                    || peer_info.set_remote_answer_pending.load(Ordering::Acquire));
-            let offer_collision = (sdp.sdp_type == RTCSdpType::Offer) && !ready_for_offer;
-            peer_info
-                .ignore_offer
-                .store(!is_polite(from_id) && offer_collision, Ordering::Release);
-
-            if peer_info.ignore_offer.load(Ordering::Acquire) {
-                anyhow::bail!("Ignore offer from {from_id} as you are impolite");
-            }
-
-            let sdp_type = sdp.sdp_type;
-            if offer_collision {
-                log::info!("We are polite, we roll back");
-                peer_info
-                    .conn
-                    .set_local_description(
-                        RTCSessionDescription::rollback(None)
-                            .context("Cannot create a rollback local description")?,
-                    )
-                    .await
-                    .context("Cannot rollback local description")?;
-            } else {
-                peer_info.conn.set_remote_description(sdp).await.with_context(|| format!("Cannot set remote description from {from_id}"))?;
-            }
+            log::warn!("TODO handle SDP from {from_id}");
+            // // SAFETY: should already be set when initiating signaling connection
+            // if *SELF_UUID.get().unwrap() != to_id {
+            //     anyhow::bail!("Received SDP destined for {to_id}");
+            // }
+            // // TODO: if peer is not found, create the peer.
+            // let kv = if let Some(kv) = OTHER_PEERS.get(&from_id) {
+            //     kv
+            // } else {
+            //     log::debug!("Peer {from_id} not found. Creating the peer connection...");
+            //     add_new_peer(from_id, outgoing.clone())
+            //         .await
+            //         .context("Cannot add offering/answering peer {from_id}")?;
+            //     // SAFETY: we just added the peer.
+            //     OTHER_PEERS.get(&from_id).unwrap()
+            // };
+            // let peer_info = kv.value();
+            //
+            // // grabbed from https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Perfect_negotiation
+            // let ready_for_offer = !peer_info.making_offer.load(Ordering::Acquire)
+            //     && (*peer_info.signal_state.read().await == RTCSignalingState::Stable
+            //         || peer_info.set_remote_answer_pending.load(Ordering::Acquire));
+            // let offer_collision = (sdp.sdp_type == RTCSdpType::Offer) && !ready_for_offer;
+            // peer_info
+            //     .ignore_offer
+            //     .store(!is_polite(from_id) && offer_collision, Ordering::Release);
+            //
+            // if peer_info.ignore_offer.load(Ordering::Acquire) {
+            //     anyhow::bail!("Ignore offer from {from_id} as you are impolite");
+            // }
+            //
+            // let sdp_type = sdp.sdp_type;
+            // if offer_collision {
+            //     log::info!("We are polite, we roll back");
+            //     peer_info
+            //         .conn
+            //         .set_local_description(
+            //             RTCSessionDescription::rollback(None)
+            //                 .context("Cannot create a rollback local description")?,
+            //         )
+            //         .await
+            //         .context("Cannot rollback local description")?;
+            // } else {
+            //     peer_info.conn.set_remote_description(sdp).await.with_context(|| format!("Cannot set remote description from {from_id}"))?;
+            // }
 
             // peer_info
             //     .set_remote_answer_pending
@@ -298,63 +300,67 @@ async fn handle_message(
             //     .set_remote_answer_pending
             //     .store(false, Ordering::Release);
             //
-            if sdp_type == RTCSdpType::Offer {
-                let answer = peer_info
-                    .conn
-                    .create_answer(None)
-                    .await
-                    .context("Cannot create answer for {from_id}")?;
-                peer_info
-                    .conn
-                    .set_local_description(answer)
-                    .await
-                    .with_context(|| {
-                        format!("Cannot set local description for connection with {from_id}")
-                    })?;
-                outgoing
-                    .send(WsExchangeMsg::Sdp {
-                        from_id: to_id,
-                        to_id: from_id,
-                        sdp: peer_info.conn.local_description().await.ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Cannot retrieve local description for connection with {from_id}"
-                            )
-                        })?,
-                    })
-                    .await
-                    .with_context(|| format!("Cannot send SDP answer back to {from_id}"))?;
+
+            // if sdp_type == RTCSdpType::Offer {
+            //     let answer = peer_info
+            //         .conn
+            //         .create_answer(None)
+            //         .await
+            //         .context("Cannot create answer for {from_id}")?;
+            //     peer_info
+            //         .conn
+            //         .set_local_description(answer)
+            //         .await
+            //         .with_context(|| {
+            //             format!("Cannot set local description for connection with {from_id}")
+            //         })?;
+            //     outgoing
+            //         .send(WsExchangeMsg::Sdp {
+            //             from_id: to_id,
+            //             to_id: from_id,
+            //             sdp: peer_info.conn.local_description().await.ok_or_else(|| {
+            //                 anyhow::anyhow!(
+            //                     "Cannot retrieve local description for connection with {from_id}"
+            //                 )
+            //             })?,
+            //         })
+            //         .await
+            //         .with_context(|| format!("Cannot send SDP answer back to {from_id}"))?;
                 // start streaming away!
                 // peer_info
                 //     .start_stream_tx
                 //     .send(())
                 //     .await
                 //     .context("Cannot ping to start streaming for {from_id}")?;
-            }
+            // }
         }
         WsExchangeMsg::IceCandidate {
-            from_id,
-            to_id,
-            candidate,
+            ..
+            // from_id,
+            // to_id,
+            // candidate,
         } => {
-            if to_id != *SELF_UUID.get().expect("SELF_UUID should already be set!") {
-                anyhow::bail!("Received a message destined to {to_id}");
-            }
-            let kv = OTHER_PEERS
-                .get(&from_id)
-                .context("Peer {from_id} doesn't exist")?;
-            kv.value()
-                .conn
-                .add_ice_candidate(candidate)
-                .await
-                .or_else(|e| {
-                    if !kv.value().ignore_offer.load(Ordering::Acquire) {
-                        log::debug!("ICE error ignored as peer is ignoring offer: {e:?}");
-                        Ok(())
-                    } else {
-                        Err(e)
-                    }
-                })
-                .with_context(|| format!("Failed to add ICE candidate to {from_id}"))?;
+            log::warn!("TODO handle ICE candidate");
+
+            // if to_id != *SELF_UUID.get().expect("SELF_UUID should already be set!") {
+            //     anyhow::bail!("Received a message destined to {to_id}");
+            // }
+            // let kv = OTHER_PEERS
+            //     .get(&from_id)
+            //     .context("Peer {from_id} doesn't exist")?;
+            // kv.value()
+            //     .conn
+            //     .add_ice_candidate(candidate)
+            //     .await
+            //     .or_else(|e| {
+            //         if !kv.value().ignore_offer.load(Ordering::Acquire) {
+            //             log::debug!("ICE error ignored as peer is ignoring offer: {e:?}");
+            //             Ok(())
+            //         } else {
+            //             Err(e)
+            //         }
+            //     })
+            //     .with_context(|| format!("Failed to add ICE candidate to {from_id}"))?;
         }
         _ => {
             anyhow::bail!("Unexpected message: {msg:?}");
@@ -364,6 +370,7 @@ async fn handle_message(
     Ok(())
 }
 
+#[allow(unused)]
 /// Creates a peer with the video track added, and adds to OTHER_PEERS table.
 async fn add_new_peer(peer_id: Uuid, outgoing: mpsc::Sender<WsExchangeMsg>) -> anyhow::Result<()> {
     let peer_conn = Arc::new(create_empty_peer_conn(peer_id, outgoing.clone()).await?);

@@ -1,10 +1,10 @@
 #[allow(unused)]
 use crate::globals::{OTHER_PEERS, SELF_UUID};
 use common::WsExchangeMsg;
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use webrtc::{peer_connection::{PeerConnectionEventHandler, RTCPeerConnectionIceEvent, RTCSignalingState}, media_stream::track_remote::TrackRemote};
+use webrtc::{peer_connection::{PeerConnectionEventHandler, RTCPeerConnectionIceEvent}, media_stream::track_remote::TrackRemote};
 
 /// Handler to use for a PeerConnection.
 pub struct WebRtcHandler {
@@ -21,13 +21,6 @@ impl WebRtcHandler {
             other_peer_id,
             ws_out_tx,
         }
-    }
-    /// Determine if this peer should be polite with the other peer.
-    /// Polite peers don't ignore other peers' offers. So, if both ends try to give offer, the
-    /// polite peer drops its offer.
-    /// SAFETY: SELF_UUID must already be set before calling.
-    pub fn is_polite(&self) -> bool {
-        return *SELF_UUID.get().unwrap() < self.other_peer_id;
     }
 }
 
@@ -55,75 +48,61 @@ impl PeerConnectionEventHandler for WebRtcHandler {
         }
     }
 
-    async fn on_signaling_state_change(&self, state: RTCSignalingState) {
-        if let Some(kv) = OTHER_PEERS.get(&self.other_peer_id) {
-            *kv.value().signal_state.write().await = state;
-        }
-    }
+    // async fn on_signaling_state_change(&self, state: RTCSignalingState) {
+    //     if let Some(kv) = OTHER_PEERS.get(&self.other_peer_id) {
+    //         *kv.value().signal_state.write().await = state;
+    //     }
+    // }
 
     async fn on_track(&self, _track: Arc<dyn TrackRemote>) {
         log::info!("On track with {}", self.other_peer_id);
     }
 
-    async fn on_negotiation_needed(&self) {
-        log::info!(
-            "Negotiation with {} needed. This peer is {}",
-            self.other_peer_id,
-            if self.is_polite() {
-                "polite"
-            } else {
-                "impolite"
-            }
-        );
-        let Some(peer_conn) = OTHER_PEERS
-            .get(&self.other_peer_id)
-            .map(|kv| kv.value().conn.clone())
-        else {
-            log::warn!("{} doesn't exist anymore...", self.other_peer_id);
-            return;
-        };
-        // SAFETY: at this point, we know the peer exists
-        OTHER_PEERS
-            .get(&self.other_peer_id)
-            .unwrap()
-            .value()
-            .making_offer
-            .store(true, Ordering::Relaxed);
-
-        let offer = match peer_conn.create_offer(None).await {
-            Ok(offer) => offer,
-            Err(e) => {
-                log::warn!("Cannot create offer for {}: {e}", self.other_peer_id);
-                return;
-            }
-        };
-        if let Err(e) = peer_conn.set_local_description(offer.clone()).await {
-            log::warn!(
-                "Cannnot set local description for connection to {}: {e}",
-                self.other_peer_id
-            );
-            return;
-        }
-        if let Err(e) = self
-            .ws_out_tx
-            .send(WsExchangeMsg::Sdp {
-                from_id: *SELF_UUID.get().unwrap(),
-                to_id: self.other_peer_id,
-                sdp: offer,
-            })
-            .await
-        {
-            log::warn!("Cannot send offer to {}: {e}", self.other_peer_id);
-            return;
-        }
-        // HACK: the peer could already be dropped at this point.
-        OTHER_PEERS
-            .get(&self.other_peer_id)
-            .unwrap()
-            .value()
-            .making_offer
-            .store(false, Ordering::Release);
-
-        log::info!("Sent offer to {}", self.other_peer_id);
-    }
+    // async fn on_negotiation_needed(&self) {
+    //     log::info!(
+    //         "Negotiation with {} needed. This peer is {}",
+    //         self.other_peer_id,
+    //         if self.is_polite() {
+    //             "polite"
+    //         } else {
+    //             "impolite"
+    //         }
+    //     );
+    //     let Some(peer_conn) = OTHER_PEERS
+    //         .get(&self.other_peer_id)
+    //         .map(|kv| kv.value().conn.clone())
+    //     else {
+    //         log::warn!("{} doesn't exist anymore...", self.other_peer_id);
+    //         return;
+    //     };
+    //     // SAFETY: at this point, we know the peer exists
+    //     let offer = match peer_conn.create_offer(None).await {
+    //         Ok(offer) => offer,
+    //         Err(e) => {
+    //             log::warn!("Cannot create offer for {}: {e}", self.other_peer_id);
+    //             return;
+    //         }
+    //     };
+    //     if let Err(e) = peer_conn.set_local_description(offer.clone()).await {
+    //         log::warn!(
+    //             "Cannnot set local description for connection to {}: {e}",
+    //             self.other_peer_id
+    //         );
+    //         return;
+    //     }
+    //     if let Err(e) = self
+    //         .ws_out_tx
+    //         .send(WsExchangeMsg::Sdp {
+    //             from_id: *SELF_UUID.get().unwrap(),
+    //             to_id: self.other_peer_id,
+    //             sdp: offer,
+    //         })
+    //         .await
+    //     {
+    //         log::warn!("Cannot send offer to {}: {e}", self.other_peer_id);
+    //         return;
+    //     }
+    //
+    //     log::info!("Sent offer to {}", self.other_peer_id);
+    // }
 }

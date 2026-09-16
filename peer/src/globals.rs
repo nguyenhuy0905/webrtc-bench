@@ -9,16 +9,17 @@ use std::{
     sync::{atomic::AtomicBool, Arc, LazyLock, OnceLock},
     time::Duration,
 };
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 use webrtc::peer_connection::{
-    PeerConnection, RTCConfiguration, RTCConfigurationBuilder, RTCIceServer, RTCSignalingState,
+    PeerConnection, RTCConfiguration, RTCConfigurationBuilder, RTCIceServer,
 };
 
 /// To be allocated by the signaling server.
 pub static SELF_UUID: OnceLock<Uuid> = OnceLock::new();
 /// It's, peer information. All the thing you'd ever need to manage a peer connection
 pub struct PeerInfo {
+    #[allow(unused)]
     /// The WebRTC connection
     /// Of course, you shouldn't change stuff here unless you're of module peer::globals.
     pub conn: Arc<dyn PeerConnection>,
@@ -26,17 +27,9 @@ pub struct PeerInfo {
     /// A sender to signify the track(s) related to this peer to start.
     /// Of course, you shouldn't change stuff here unless you're of module peer::globals.
     pub start_stream_tx: mpsc::Sender<()>,
-    // the three booleans down here, is copy from mdn docs on "perfect negotiation".
-    /// Whether the peer handler is making an offer
-    /// Of course, you shouldn't change stuff here unless you're of module peer::handle.
-    pub making_offer: AtomicBool,
-    /// Whether the peer handler is *not* taking any offer
-    /// You're probably changing this in peer::main.
-    pub ignore_offer: AtomicBool,
-    /// Toggled on while setting remote description, when remote description is an answer.
-    pub set_remote_answer_pending: AtomicBool,
-    /// Updated every time the event handler's `on_signaling_state_change` is triggered.
-    pub signal_state: RwLock<RTCSignalingState>,
+    #[allow(unused)]
+    /// Set once.
+    pub is_caller: AtomicBool,
 }
 
 impl PeerInfo {
@@ -47,10 +40,7 @@ impl PeerInfo {
         Self {
             conn,
             start_stream_tx,
-            making_offer: AtomicBool::from(false),
-            ignore_offer: AtomicBool::from(false),
-            set_remote_answer_pending: AtomicBool::from(false),
-            signal_state: RwLock::new(RTCSignalingState::Stable),
+            is_caller: AtomicBool::from(false),
         }
     }
 }
