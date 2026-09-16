@@ -12,17 +12,10 @@ pub enum WsExchangeMsg {
     // Join isn't needed, creating the WebSocket channel is inferred as a join request.
     /// Response to a join request, from the signaling server, with the peer ID.
     JoinPeerId(Uuid),
-    /// Will be sent `on_negotiation_needed`.
-    Offer {
+    Sdp {
         from_id: Uuid,
         to_id: Uuid,
-        offer: RTCSessionDescription,
-    },
-    /// An answer to an offer.
-    Answer {
-        from_id: Uuid,
-        to_id: Uuid,
-        answer: RTCSessionDescription,
+        sdp: RTCSessionDescription,
     },
     /// When a peer first joins, other peers are broadcasted the new peer's UUID. Those peers will
     /// ping the signaling server their offers, and the signaling server forwards that to the new

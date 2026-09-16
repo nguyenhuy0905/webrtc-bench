@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = match TcpListener::bind(&args.host).await {
         Ok(lis) => lis,
-        Err(e) => anyhow::bail!("Cannot bind to {}: {e}", &args.host),
+        Err(e) => anyhow::bail!("Cannot bind to {}: {e}", args.host),
     };
     log::info!(
         "Listening on {}",
@@ -112,7 +112,7 @@ async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::R
             log::info!("Recv msg from {}: {}", *uuid, msg.to_text().unwrap());
 
             // make sure the message is valid before broadcasting...
-            let msg: WsExchangeMsg = match serde_json::from_str(&msg.to_text().unwrap()) {
+            let msg: WsExchangeMsg = match serde_json::from_str(msg.to_text().unwrap()) {
                 Ok(s) => s,
                 Err(e) => match e.classify() {
                     Category::Io => {
@@ -127,8 +127,7 @@ async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::R
                 },
             };
             match &msg {
-                &WsExchangeMsg::Offer { from_id, to_id, .. }
-                | &WsExchangeMsg::Answer { from_id, to_id, .. } => {
+                &WsExchangeMsg::Sdp { from_id, to_id, .. } => {
                     log::trace!("SDP from {from_id} to {to_id}");
                     if PEER_UUID_AND_SENDER.get(&from_id).is_none() {
                         log::warn!("From-peer {from_id} does not exist (anymore). Skipping...");
@@ -277,10 +276,10 @@ async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::R
 /// Remove the peer with the specified address.
 async fn remove_peer_addr(addr: &SocketAddr) {
     // `cloned` in hopes we drop the lock ASAP.
-    let uuid = PEER_ADDR_AND_UUID.get(&addr).map(|opt| opt.value().clone());
+    let uuid = PEER_ADDR_AND_UUID.get(addr).map(|opt| *opt.value());
     if let Some(uuid) = uuid {
         PEER_UUID_AND_SENDER.remove(&uuid);
-        PEER_ADDR_AND_UUID.remove(&addr);
+        PEER_ADDR_AND_UUID.remove(addr);
     }
 }
 
