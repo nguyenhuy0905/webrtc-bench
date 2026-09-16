@@ -56,7 +56,7 @@ struct Opts {
     /// Path to video file
     #[arg(short='p', long, default_value_t="input.h264".into())]
     video_file: String,
-    /// Save video to file
+    // /// Save video to file
     // #[arg(short='s', long)]
     // save_to_file: String,
 }
