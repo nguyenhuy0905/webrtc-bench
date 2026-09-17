@@ -181,8 +181,7 @@ async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::R
                 }
                 &WsExchangeMsg::LeavePeerId(uuid) => {
                     // remove peer first...
-                    let remove_uuid_check = PEER_ADDR_AND_UUID.get(&addr);
-                    match remove_uuid_check {
+                    match PEER_ADDR_AND_UUID.get(&addr) {
                         None => {
                             log::warn!("Peer {} doesn't exist (anymore)", uuid);
                             continue;

@@ -4,14 +4,15 @@ use dashmap::DashMap;
 use rtc::{
     peer_connection::configuration::media_engine::MIME_TYPE_H264,
     rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters},
-    // media::io::h26x_writer::H26xWriter,
+    media::io::h26x_writer::H26xWriter,
 };
 use std::{
     sync::{atomic::AtomicBool, Arc, LazyLock, OnceLock},
     time::Duration,
-    // fs::File,
+    fs::File,
+    io::BufWriter,
 };
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use uuid::Uuid;
 use webrtc::peer_connection::{
     PeerConnection, RTCConfiguration, RTCConfigurationBuilder, RTCIceServer,
@@ -68,8 +69,9 @@ pub static VIDEO_CODEC: LazyLock<RTCRtpCodecParameters> = LazyLock::new(|| RTCRt
     },
     // h264 or something...
     payload_type: 102,
+    ..Default::default()
 });
-/// THe configuration shared by all peers.
+/// The configuration shared by all peers.
 pub static PEER_CONF: LazyLock<RTCConfiguration> = LazyLock::new(|| {
     RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
@@ -79,11 +81,14 @@ pub static PEER_CONF: LazyLock<RTCConfiguration> = LazyLock::new(|| {
         }])
         .build()
 });
-/// ~30fps
-pub static H26X_FRAME_DURATION: Duration = Duration::from_millis(33);
+/// ~25fps
+pub static H26X_FRAME_DURATION: Duration = Duration::from_millis(40);
 /// I love global states
 pub static VIDEO_FILE_NAME: OnceLock<String> = OnceLock::new();
-// pub static VIDEO_SAVE_FILE: OnceLock<H26xWriter<File>> = OnceLock::new();
+// NOTE we don't handle SSRC collision for now.
+pub static VIDEO_SSRC: LazyLock<u32> = LazyLock::new(rand::random);
+// I really love global states
+pub static VIDEO_SAVE_FILE: OnceLock<Mutex<H26xWriter<BufWriter<File>>>> = OnceLock::new();
 /// <C-c> signal.
 pub static CTRLC_BROADCAST: LazyLock<broadcast::Sender<()>> = LazyLock::new(|| {
     let (ctrlc_tx, _) = broadcast::channel::<()>(1);

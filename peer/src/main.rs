@@ -8,7 +8,7 @@
 // So, `matchbox` turned out to not be such a bright idea.
 // I'll make my own WebSocket (building from `tokio-tungstenite`) then
 
-// TODO: move sending SDP offer/answer to `on_negotiation_needed`.
+// TODO: save the received video to a video file
 
 mod globals;
 mod handle;
@@ -22,17 +22,25 @@ use futures_util::{
 };
 use globals::{
     PeerInfo, CTRLC_BROADCAST, H26X_FRAME_DURATION, OTHER_PEERS, PEER_CONF, RUNTIME, SELF_UUID,
-    VIDEO_CODEC, VIDEO_FILE_NAME,
+    VIDEO_CODEC, VIDEO_FILE_NAME, VIDEO_SSRC,
 };
 use rtc::{
-    media::{io::h26x_reader::sample_reader::H26xSampleReader, Sample},
+    media::{
+        io::{h26x_reader::sample_reader::H26xSampleReader, h26x_writer::H26xWriter},
+        Sample,
+    },
     rtp_transceiver::{
         rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind},
         PayloadType,
     },
 };
-use std::{fs::File, io::BufReader, sync::Arc, time::Duration};
-use tokio::{net::TcpStream, sync::mpsc};
+use std::{
+    fs::{File, OpenOptions},
+    io::{BufReader, BufWriter},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{net::TcpStream, sync::{mpsc, Mutex}};
 use tokio_tungstenite::{
     tungstenite::{error::Error as TungsteniteError, protocol::Message},
     MaybeTlsStream, WebSocketStream,
@@ -57,8 +65,8 @@ struct Opts {
     #[arg(short='p', long, default_value_t="input.h264".into())]
     video_file: String,
     // /// Save video to file
-    // #[arg(short='s', long)]
-    // save_to_file: String,
+    #[arg(short='s', long, default_value_t=format!("save-video-{}.h264", Uuid::new_v4()))]
+    video_save_to_file: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -68,9 +76,16 @@ fn main() -> anyhow::Result<()> {
 async fn main_async() -> anyhow::Result<()> {
     env_logger::init();
     let args = Opts::parse();
+    log::info!("Saving video to {}", args.video_save_to_file);
 
     // initialize some stuff
     globals::VIDEO_FILE_NAME.get_or_init(|| args.video_file);
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&args.video_save_to_file)
+        .with_context(|| format!("Cannot open file {}", args.video_save_to_file))?;
+    globals::VIDEO_SAVE_FILE.get_or_init(|| Mutex::new(H26xWriter::new(BufWriter::new(file), false)));
 
     // connect to signaling server
     // this will tell the signaling server that this peer wants to join the channel. Currently,
@@ -294,7 +309,7 @@ async fn handle_message(
                     log::warn!("TODO handle answer from {from_id}");
                     let other_peer = OTHER_PEERS
                         .get(&from_id)
-                        .with_context(||format!("Peer {from_id} doesn't exist (yet)"))
+                        .with_context(|| format!("Peer {from_id} doesn't exist (yet)"))
                         .context(CONTEXT)?;
                     other_peer
                         .value()
@@ -370,12 +385,11 @@ async fn stream_video(
     let reader = BufReader::new(file);
     // really, you must've had SSRC here already
     let ssrc = *video_track.ssrcs().await.first().unwrap();
-    // the number is 2^20, the bool means it's not H265
-    let mut video_reader = H26xSampleReader::new(reader, 1_048_576, false);
-    // we only need 30fps, so don't go overboard.
+    // the bool means it's not H265
+    let mut video_reader = H26xSampleReader::new(reader, 1024 * 1024, false);
+    // we only need 60fps, so don't go overboard.
     let mut tick = tokio::time::interval(H26X_FRAME_DURATION);
     // let mut instant = Instant::now();
-    // let mut timestamp: u32 = rand::random();
     loop {
         let sample = match video_reader.next_sample() {
             Ok(sample) => sample,
@@ -385,7 +399,7 @@ async fn stream_video(
             }
         };
 
-        if let Err(e) = video_track
+        video_track
             .sample_writer(ssrc, payload_type)
             .write_sample(&Sample {
                 data: sample.data,
@@ -396,11 +410,7 @@ async fn stream_video(
                 },
                 ..Default::default()
             })
-            .await
-        {
-            log::warn!("Error sending video: {e}");
-            break;
-        };
+            .await?;
         if sample.timed {
             tick.tick().await;
         }
@@ -413,20 +423,19 @@ async fn stream_video(
 async fn add_media_to_connection(
     peer_conn: Arc<dyn PeerConnection>,
 ) -> anyhow::Result<mpsc::Sender<()>> {
-    let ssrc = rand::random::<u32>();
     let video_track = Arc::new(
         TrackLocalStaticSample::new(MediaStreamTrack::new(
             // TODO: these, as suggested by the specs, should be UUIDs.
             // stream ID
-            "video-stream-1".to_string(),
+            format!("video-stream-{}", rand::random::<u32>()),
             // track ID
-            "video-track-1".to_string(),
+            format!("video-track-{}", rand::random::<u32>()),
             // label
-            "Video track".to_string(),
+            "Video track".to_owned(),
             RtpCodecKind::Video,
             vec![RTCRtpEncodingParameters {
                 rtp_coding_parameters: RTCRtpCodingParameters {
-                    ssrc: Some(ssrc),
+                    ssrc: Some(*VIDEO_SSRC),
                     ..Default::default()
                 },
                 // why do I have to repeat myself here...

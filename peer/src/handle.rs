@@ -2,16 +2,25 @@
 use crate::globals::{OTHER_PEERS, SELF_UUID};
 use common::WsExchangeMsg;
 use rtc::{
+    media::io::Writer,
     // peer_connection::configuration::media_engine::MIME_TYPE_H264,
     rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication,
     rtp_transceiver::rtp_sender::RtpCodecKind,
-    // media::io::h26x_writer::H26xWriter,
+    statistics::{
+        stats::rtp_stream::received::{
+            inbound::RTCInboundRtpStreamStats, RTCReceivedRtpStreamStats,
+        },
+        StatsSelector,
+    },
 };
-use std::{sync::Arc, time::Duration};
-use tokio::sync::{mpsc};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 use webrtc::{
-    media_stream::track_remote::TrackRemote,
+    media_stream::track_remote::{TrackRemote, TrackRemoteEvent},
     peer_connection::{
         PeerConnectionEventHandler, RTCPeerConnectionIceEvent, RTCPeerConnectionState,
     },
@@ -96,10 +105,53 @@ impl PeerConnectionEventHandler for WebRtcHandler {
             }));
         }
 
-        loop {
-            // so that track isn't dropped
-            tokio::time::sleep(Duration::from_secs(3)).await;
-        }
+        // SAFETY: this peer is still on?
+        let peer_conn = OTHER_PEERS
+            .get(&self.other_peer_id)
+            .unwrap()
+            .value()
+            .conn
+            .clone();
+        // saving track to disk
+        tokio::spawn(async move {
+            while let Some(evt) = track.poll().await {
+                if let TrackRemoteEvent::OnRtpPacket(packet) = evt {
+                    let mut w = crate::globals::VIDEO_SAVE_FILE.get().unwrap().lock().await;
+                    if let Err(err) = w.write_rtp(&packet) {
+                        println!("video write_rtp error: {err}");
+                        break;
+                    }
+                }
+            }
+        });
+        // stat-logging every now and then
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let report = peer_conn
+                    .get_stats(Instant::now(), StatsSelector::None)
+                    .await;
+                if report.is_empty() {
+                    continue;
+                }
+
+                for RTCInboundRtpStreamStats {
+                    received_rtp_stream_stats:
+                        RTCReceivedRtpStreamStats {
+                            packets_received,
+                            jitter,
+                            ..
+                        },
+                    // frames_received,
+                    ..
+                } in report.inbound_rtp_streams()
+                {
+                    log::info!("Periodic stats:");
+                    log::info!("\tPackets received: {packets_received}");
+                    log::info!("\tJitter: {jitter:.3}");
+                }
+            }
+        });
     }
 
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
