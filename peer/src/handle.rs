@@ -142,7 +142,6 @@ impl PeerConnectionEventHandler for WebRtcHandler {
                             jitter,
                             ..
                         },
-                    // frames_received,
                     ..
                 } in report.inbound_rtp_streams()
                 {
