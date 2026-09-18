@@ -22,3 +22,6 @@
 - The `on_track` event currently just spin-loop to hold on to the track, so
 that it doesn't err out trying to send the video. But, so far, video sending
 works well.
+
+## Weird stats, but I take it
+- I hope it still sends RTCP SR.
