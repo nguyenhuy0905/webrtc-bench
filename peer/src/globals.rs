@@ -7,7 +7,7 @@ use rtc::{
     media::io::h26x_writer::H26xWriter,
 };
 use std::{
-    sync::{atomic::AtomicBool, Arc, LazyLock, OnceLock},
+    sync::{Arc, LazyLock, OnceLock},
     time::Duration,
     fs::File,
     io::BufWriter,
@@ -22,17 +22,12 @@ use webrtc::peer_connection::{
 pub static SELF_UUID: OnceLock<Uuid> = OnceLock::new();
 /// It's, peer information. All the thing you'd ever need to manage a peer connection
 pub struct PeerInfo {
-    #[allow(unused)]
     /// The WebRTC connection
     /// Of course, you shouldn't change stuff here unless you're of module peer::globals.
     pub conn: Arc<dyn PeerConnection>,
-    #[allow(unused)]
     /// A sender to signify the track(s) related to this peer to start.
     /// Of course, you shouldn't change stuff here unless you're of module peer::globals.
     pub start_stream_tx: mpsc::Sender<()>,
-    #[allow(unused)]
-    /// Set once.
-    pub is_caller: AtomicBool,
 }
 
 impl PeerInfo {
@@ -40,7 +35,6 @@ impl PeerInfo {
         Self {
             conn,
             start_stream_tx,
-            is_caller: AtomicBool::from(false),
         }
     }
 }

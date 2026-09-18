@@ -4,19 +4,19 @@ use common::WsExchangeMsg;
 use rtc::{
     // media::io::Writer,
     // peer_connection::configuration::media_engine::MIME_TYPE_H264,
-    rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication,
+    rtcp::{payload_feedbacks::picture_loss_indication::PictureLossIndication},
     rtp_transceiver::rtp_sender::RtpCodecKind,
-    statistics::{
-        stats::rtp_stream::{
-            received::{inbound::RTCInboundRtpStreamStats, RTCReceivedRtpStreamStats},
-            // sent::remote_outbound::RTCRemoteOutboundRtpStreamStats,
-        },
-        // StatsSelector,
-    },
+    // statistics::{
+    //     stats::rtp_stream::{
+    //         received::{inbound::RTCInboundRtpStreamStats, RTCReceivedRtpStreamStats},
+    //         sent::remote_outbound::RTCRemoteOutboundRtpStreamStats,
+    //     },
+    //     StatsSelector,
+    // },
 };
 use std::{
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration},
 };
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -80,12 +80,6 @@ impl PeerConnectionEventHandler for WebRtcHandler {
             .expect("track should expose SSRCs before on_track");
         log::info!("On track with {}, SSRC {}", self.other_peer_id, media_ssrc);
 
-        // let mime_type = track
-        //     .codec(media_ssrc)
-        //     .await
-        //     .map(|c| c.mime_type.to_lowercase())
-        //     .unwrap_or(MIME_TYPE_H264.to_lowercase());
-
         // Send PLI every 3 seconds for video tracks to request keyframes
         if kind == RtpCodecKind::Video {
             let pli_track = track.clone();
@@ -109,14 +103,6 @@ impl PeerConnectionEventHandler for WebRtcHandler {
             }));
         }
 
-        // SAFETY: this peer is still on?
-        let peer_conn = OTHER_PEERS
-            .get(&self.other_peer_id)
-            .unwrap()
-            .value()
-            .conn
-            .clone();
-        // saving track to disk
         tokio::spawn(async move {
             while let Some(evt) = track.poll().await {
                 match evt {
@@ -127,71 +113,7 @@ impl PeerConnectionEventHandler for WebRtcHandler {
                         //     break;
                         // }
                     }
-                    TrackRemoteEvent::OnRtcpPacket(_) => {
-                        // NOTE: somehow this never triggers.
-                        log::info!("Received RTCP packet(s)"); 
-                    }
                     _ => {}
-                }
-            }
-        });
-        // stat-logging every now and then
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(3)).await;
-                let report = match peer_conn
-                    .get_receivers()
-                    .await
-                    .first()
-                    .unwrap()
-                    .get_stats(Instant::now())
-                    .await
-                {
-                    Err(e) => {
-                        log::warn!("Cannot get stats: {e:?}");
-                        continue;
-                    }
-                    Ok(report) => report,
-                };
-                // let now = Instant::now();
-                if report.is_empty() {
-                    continue;
-                }
-
-                for RTCInboundRtpStreamStats {
-                    received_rtp_stream_stats:
-                        RTCReceivedRtpStreamStats {
-                            packets_received,
-                            jitter,
-                            ..
-                        },
-                    bytes_received,
-                    // estimated_playout_timestamp,
-                    // remote_id,
-                    ..
-                } in report.inbound_rtp_streams()
-                {
-                    log::info!("Periodic stats:");
-                    log::info!("\tPackets received: {packets_received}");
-                    log::info!("\tBytes received: {bytes_received}");
-                    log::info!("\tJitter: {jitter:.3}");
-                    // log::info!("\tEstimated playout timestamp: {:?}", estimated_playout_timestamp);
-                    // log::info!("\tLocal time: {now:?}")
-                    // log::info!("Playout delay: {:?}", now - *estimated_playout_timestamp);
-                    // NOTE: RTCP SRs sent is somehow always 0
-                    // if let Some(RTCStatsReportEntry::RemoteOutboundRtp(
-                    //     RTCRemoteOutboundRtpStreamStats {
-                    //         remote_timestamp,
-                    //         reports_sent,
-                    //         ..
-                    //     },
-                    // )) = report.get(&remote_id)
-                    // {
-                    //     log::info!("\tRTCP SRs sent: {reports_sent}");
-                    //     log::info!("\tLocal timestamp: {:?}", now);
-                    //     log::info!("\tRemote timestamp: {:?}", remote_timestamp);
-                    //     log::info!("\tDelay: {:?}", now - *remote_timestamp);
-                    // }
                 }
             }
         });

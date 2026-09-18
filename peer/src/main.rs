@@ -26,22 +26,25 @@ use globals::{
 };
 // use rand::distr::Distribution as _;
 use rtc::{
+    interceptor::{interceptor, Interceptor, Packet, StreamInfo, TaggedPacket},
     media::{
         io::{h26x_reader::sample_reader::H26xSampleReader, h26x_writer::H26xWriter},
         Sample,
     },
+    rtcp::receiver_report::ReceiverReport,
     rtp_transceiver::{
         rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind},
         PayloadType,
     },
-    interceptor::{Interceptor, TaggedPacket},
+    sansio,
+    shared::{error::Error, time::SystemInstant},
 };
 use std::{
+    collections::VecDeque,
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter, Write as _},
     sync::Arc,
-    time::Duration,
-    collections::VecDeque,
+    time::{Duration, Instant},
 };
 use tokio::{
     net::TcpStream,
@@ -54,7 +57,10 @@ use tokio_tungstenite::{
 use uuid::Uuid;
 #[allow(unused)]
 use webrtc::{
-    media_stream::{track_local::static_sample::TrackLocalStaticSample, MediaStreamTrack, Track},
+    media_stream::{
+        track_local::{static_sample::TrackLocalStaticSample, TrackLocal as _, TrackLocalEvent},
+        MediaStreamTrack, Track,
+    },
     peer_connection::{
         register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
         RTCSdpType, RTCSessionDescription, RTCSignalingState, Registry,
@@ -126,7 +132,11 @@ async fn main_async() -> anyhow::Result<()> {
                 .open(format!("stats-{self_id}.csv"))
                 .with_context(|| format!("Cannot open or create CSV file stat-{self_id}.csv"))?,
         ));
-        csv_file.lock().await.write(b"").context("Cannot write CSV file header")?;
+        csv_file
+            .lock()
+            .await
+            .write(b"")
+            .context("Cannot write CSV file header")?;
         CSV_FILE
             .set(csv_file)
             .expect("Somehow CSV_FILE is already set");
@@ -385,6 +395,7 @@ async fn create_empty_peer_conn(
     // let registry = configure_rtcp_reports(Registry::new());
     let registry = register_default_interceptors(Registry::new(), &mut media_engine)
         .context("Cannot register interceptor")?;
+    let registry = registry.with(RTCPFwdInterceptor::new);
 
     PeerConnectionBuilder::new()
         .with_configuration(PEER_CONF.clone())
@@ -409,6 +420,35 @@ async fn stream_video(
     let mut video_reader = H26xSampleReader::new(reader, 1024 * 1024, false);
     let mut tick = tokio::time::interval(H26X_FRAME_DURATION);
 
+    // get the RTCP RR
+    let vtr = video_track.clone();
+    tokio::spawn(async move {
+        let video_track = vtr;
+        while let Some(TrackLocalEvent::OnRtcpPacket(packets)) = video_track.poll().await {
+            for packet in packets {
+                let now = (SystemInstant::now().ntp(Instant::now()) >> 16) as u32;
+                let Some(rr) = packet.as_any().downcast_ref::<ReceiverReport>() else {
+                    continue;
+                };
+                let Some(report) = rr.reports.first() else {
+                    continue;
+                };
+                // no SR sent yet. Can't do much.
+                if report.last_sender_report == 0 && report.delay == 0 {
+                    continue;
+                }
+                // middle NTP of current instant.
+                // formula in RFC3350, section 6.4.2
+                let rtt = now - report.delay - report.last_sender_report;
+                // RTT in milliseconds
+                let rtt_float: f32 =
+                    ((rtt >> 16) as f32 + ((rtt & 0x0000_FFFF) as f32) / 65_536f32) * 1_000f32;
+                log::info!("RTT: {rtt_float:.3}ms");
+            }
+        }
+    });
+
+    // send da video
     loop {
         let sample = match video_reader.next_sample() {
             Ok(sample) => sample,
@@ -505,4 +545,44 @@ struct RTCPFwdInterceptor<P: Interceptor> {
     #[next]
     next: P,
     read_queue: VecDeque<TaggedPacket>,
+}
+
+impl<P: Interceptor> RTCPFwdInterceptor<P> {
+    fn new(next: P) -> Self {
+        Self {
+            next,
+            read_queue: VecDeque::new(),
+        }
+    }
+}
+
+#[interceptor]
+impl<P: Interceptor> RTCPFwdInterceptor<P> {
+    #[overrides]
+    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        if let Packet::Rtcp(rtcp_packets) = &msg.message {
+            self.read_queue.push_back(TaggedPacket {
+                now: msg.now,
+                transport: msg.transport,
+                message: Packet::Rtcp(rtcp_packets.clone()),
+            });
+        }
+        self.next.handle_read(msg)
+    }
+
+    #[overrides]
+    fn poll_read(&mut self) -> Option<Self::Rout> {
+        // First return any queued RTCP packets
+        if let Some(pkt) = self.read_queue.pop_front() {
+            return Some(pkt);
+        }
+        // Then check next interceptor
+        self.next.poll_read()
+    }
+
+    #[overrides]
+    fn close(&mut self) -> Result<(), Self::Error> {
+        self.read_queue.clear();
+        self.next.close()
+    }
 }

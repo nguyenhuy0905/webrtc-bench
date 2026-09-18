@@ -1,5 +1,4 @@
 //! Common types and methods that `peer` and `signal` both use.
-#![allow(unused)]
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use webrtc::peer_connection::{RTCIceCandidateInit, RTCSessionDescription};
