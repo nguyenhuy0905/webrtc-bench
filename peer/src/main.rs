@@ -21,9 +21,10 @@ use futures_util::{
     SinkExt,
 };
 use globals::{
-    PeerInfo, CTRLC_BROADCAST, H26X_FRAME_DURATION, OTHER_PEERS, PEER_CONF, RUNTIME, SELF_UUID,
-    VIDEO_CODEC, VIDEO_FILE_NAME, VIDEO_SSRC,
+    PeerInfo, CSV_FILE, CTRLC_BROADCAST, H26X_FRAME_DURATION, OTHER_PEERS, PEER_CONF, RUNTIME,
+    SELF_UUID, VIDEO_CODEC, VIDEO_FILE_NAME, VIDEO_SSRC,
 };
+// use rand::distr::Distribution as _;
 use rtc::{
     media::{
         io::{h26x_reader::sample_reader::H26xSampleReader, h26x_writer::H26xWriter},
@@ -33,14 +34,19 @@ use rtc::{
         rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind},
         PayloadType,
     },
+    interceptor::{Interceptor, TaggedPacket},
 };
 use std::{
     fs::{File, OpenOptions},
-    io::{BufReader, BufWriter},
+    io::{BufReader, BufWriter, Write as _},
     sync::Arc,
     time::Duration,
+    collections::VecDeque,
 };
-use tokio::{net::TcpStream, sync::{mpsc, Mutex}};
+use tokio::{
+    net::TcpStream,
+    sync::{mpsc, Mutex},
+};
 use tokio_tungstenite::{
     tungstenite::{error::Error as TungsteniteError, protocol::Message},
     MaybeTlsStream, WebSocketStream,
@@ -112,6 +118,18 @@ async fn main_async() -> anyhow::Result<()> {
             .set(self_id)
             .expect("Somehow SELF_UUID is already set");
         log::info!("Initialize self as {self_id}");
+        let csv_file = Mutex::new(BufWriter::new(
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(format!("stats-{self_id}.csv"))
+                .with_context(|| format!("Cannot open or create CSV file stat-{self_id}.csv"))?,
+        ));
+        csv_file.lock().await.write(b"").context("Cannot write CSV file header")?;
+        CSV_FILE
+            .set(csv_file)
+            .expect("Somehow CSV_FILE is already set");
+        log::info!("Saving stats to stat-{self_id}.csv");
     } else {
         anyhow::bail!("WsExchangeMsg didn't return JoinPeerId");
     }

@@ -115,22 +115,41 @@ impl PeerConnectionEventHandler for WebRtcHandler {
         // saving track to disk
         tokio::spawn(async move {
             while let Some(evt) = track.poll().await {
-                if let TrackRemoteEvent::OnRtpPacket(packet) = evt {
-                    let mut w = crate::globals::VIDEO_SAVE_FILE.get().unwrap().lock().await;
-                    if let Err(err) = w.write_rtp(&packet) {
-                        println!("video write_rtp error: {err}");
-                        break;
+                match evt {
+                    TrackRemoteEvent::OnRtpPacket(_) => {
+                        // let mut w = crate::globals::VIDEO_SAVE_FILE.get().unwrap().lock().await;
+                        // if let Err(err) = w.write_rtp(&packet) {
+                        //     println!("video write_rtp error: {err}");
+                        //     break;
+                        // }
                     }
+                    TrackRemoteEvent::OnRtcpPacket(_) => {
+                        // NOTE: somehow this never triggers.
+                        log::info!("Received RTCP packet(s)"); 
+                    }
+                    _ => {}
                 }
             }
         });
         // stat-logging every now and then
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                let report = peer_conn
-                    .get_stats(Instant::now(), StatsSelector::None)
-                    .await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                let report = match peer_conn
+                    .get_receivers()
+                    .await
+                    .first()
+                    .unwrap()
+                    .get_stats(Instant::now())
+                    .await
+                {
+                    Err(e) => {
+                        log::warn!("Cannot get stats: {e:?}");
+                        continue;
+                    }
+                    Ok(report) => report,
+                };
+                // let now = Instant::now();
                 if report.is_empty() {
                     continue;
                 }
