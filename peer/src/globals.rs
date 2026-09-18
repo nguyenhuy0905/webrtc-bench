@@ -75,7 +75,11 @@ pub static VIDEO_CODEC: LazyLock<RTCRtpCodecParameters> = LazyLock::new(|| RTCRt
 pub static PEER_CONF: LazyLock<RTCConfiguration> = LazyLock::new(|| {
     RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
-            // the STUN server we control.
+            // TURN
+            // urls: vec!["turn:127.0.0.1:3478?transport=udp".to_owned()],
+            // username: "lenin".to_owned(),
+            // credential: "lenin420".to_owned(),
+            // STUN
             urls: vec!["stun:127.0.0.1:3478".to_string()],
             ..Default::default()
         }])
