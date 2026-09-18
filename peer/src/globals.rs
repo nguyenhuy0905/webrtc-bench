@@ -85,8 +85,8 @@ pub static PEER_CONF: LazyLock<RTCConfiguration> = LazyLock::new(|| {
         }])
         .build()
 });
-/// ~25fps
-pub static H26X_FRAME_DURATION: Duration = Duration::from_millis(40);
+/// ~24fps
+pub static H26X_FRAME_DURATION: Duration = Duration::from_millis(41);
 /// I love global states
 pub static VIDEO_FILE_NAME: OnceLock<String> = OnceLock::new();
 // NOTE we don't handle SSRC collision for now.

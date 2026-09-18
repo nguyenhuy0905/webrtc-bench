@@ -1,16 +1,17 @@
 #[allow(unused)]
-use crate::globals::{OTHER_PEERS, SELF_UUID};
+use crate::globals::{OTHER_PEERS, SELF_UUID, VIDEO_SSRC};
 use common::WsExchangeMsg;
 use rtc::{
-    media::io::Writer,
+    // media::io::Writer,
     // peer_connection::configuration::media_engine::MIME_TYPE_H264,
     rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication,
     rtp_transceiver::rtp_sender::RtpCodecKind,
     statistics::{
-        stats::rtp_stream::received::{
-            inbound::RTCInboundRtpStreamStats, RTCReceivedRtpStreamStats,
+        stats::rtp_stream::{
+            received::{inbound::RTCInboundRtpStreamStats, RTCReceivedRtpStreamStats},
+            // sent::remote_outbound::RTCRemoteOutboundRtpStreamStats,
         },
-        StatsSelector,
+        // StatsSelector,
     },
 };
 use std::{
@@ -23,6 +24,7 @@ use webrtc::{
     media_stream::track_remote::{TrackRemote, TrackRemoteEvent},
     peer_connection::{
         PeerConnectionEventHandler, RTCPeerConnectionIceEvent, RTCPeerConnectionState,
+        // RTCStatsReportEntry,
     },
 };
 
@@ -76,7 +78,7 @@ impl PeerConnectionEventHandler for WebRtcHandler {
             .await
             .first()
             .expect("track should expose SSRCs before on_track");
-        log::info!("On track with {}", self.other_peer_id);
+        log::info!("On track with {}, SSRC {}", self.other_peer_id, media_ssrc);
 
         // let mime_type = track
         //     .codec(media_ssrc)
@@ -95,13 +97,15 @@ impl PeerConnectionEventHandler for WebRtcHandler {
                         _ = timeout => {
                             result = pli_track
                                 .write_rtcp(vec![Box::new(PictureLossIndication {
-                                    sender_ssrc: 0,
+                                    sender_ssrc: *VIDEO_SSRC,
                                     media_ssrc,
                                 })])
                                 .await;
+                            // log::info!("Sent PLI");
                         }
                     }
                 }
+                // log::warn!("Cannot send PLI anymore");
             }));
         }
 
@@ -161,12 +165,33 @@ impl PeerConnectionEventHandler for WebRtcHandler {
                             jitter,
                             ..
                         },
+                    bytes_received,
+                    // estimated_playout_timestamp,
+                    // remote_id,
                     ..
                 } in report.inbound_rtp_streams()
                 {
                     log::info!("Periodic stats:");
                     log::info!("\tPackets received: {packets_received}");
+                    log::info!("\tBytes received: {bytes_received}");
                     log::info!("\tJitter: {jitter:.3}");
+                    // log::info!("\tEstimated playout timestamp: {:?}", estimated_playout_timestamp);
+                    // log::info!("\tLocal time: {now:?}")
+                    // log::info!("Playout delay: {:?}", now - *estimated_playout_timestamp);
+                    // NOTE: RTCP SRs sent is somehow always 0
+                    // if let Some(RTCStatsReportEntry::RemoteOutboundRtp(
+                    //     RTCRemoteOutboundRtpStreamStats {
+                    //         remote_timestamp,
+                    //         reports_sent,
+                    //         ..
+                    //     },
+                    // )) = report.get(&remote_id)
+                    // {
+                    //     log::info!("\tRTCP SRs sent: {reports_sent}");
+                    //     log::info!("\tLocal timestamp: {:?}", now);
+                    //     log::info!("\tRemote timestamp: {:?}", remote_timestamp);
+                    //     log::info!("\tDelay: {:?}", now - *remote_timestamp);
+                    // }
                 }
             }
         });

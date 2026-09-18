@@ -82,7 +82,7 @@ fn main() -> anyhow::Result<()> {
 async fn main_async() -> anyhow::Result<()> {
     env_logger::init();
     let args = Opts::parse();
-    log::info!("Saving video to {}", args.video_save_to_file);
+    // log::info!("Saving video to {}", args.video_save_to_file);
 
     // initialize some stuff
     globals::VIDEO_FILE_NAME.get_or_init(|| args.video_file);
@@ -91,7 +91,8 @@ async fn main_async() -> anyhow::Result<()> {
         .create(true)
         .open(&args.video_save_to_file)
         .with_context(|| format!("Cannot open file {}", args.video_save_to_file))?;
-    globals::VIDEO_SAVE_FILE.get_or_init(|| Mutex::new(H26xWriter::new(BufWriter::new(file), false)));
+    globals::VIDEO_SAVE_FILE
+        .get_or_init(|| Mutex::new(H26xWriter::new(BufWriter::new(file), false)));
 
     // connect to signaling server
     // this will tell the signaling server that this peer wants to join the channel. Currently,
@@ -381,6 +382,7 @@ async fn create_empty_peer_conn(
     media_engine
         .register_codec(VIDEO_CODEC.clone(), RtpCodecKind::Video)
         .context("Cannot register H264 codec")?;
+    // let registry = configure_rtcp_reports(Registry::new());
     let registry = register_default_interceptors(Registry::new(), &mut media_engine)
         .context("Cannot register interceptor")?;
 
@@ -405,9 +407,8 @@ async fn stream_video(
     let ssrc = *video_track.ssrcs().await.first().unwrap();
     // the bool means it's not H265
     let mut video_reader = H26xSampleReader::new(reader, 1024 * 1024, false);
-    // we only need 60fps, so don't go overboard.
     let mut tick = tokio::time::interval(H26X_FRAME_DURATION);
-    // let mut instant = Instant::now();
+
     loop {
         let sample = match video_reader.next_sample() {
             Ok(sample) => sample,
@@ -497,4 +498,11 @@ async fn add_media_to_connection(
     });
 
     Ok(start_stream_tx)
+}
+
+#[derive(Interceptor)]
+struct RTCPFwdInterceptor<P: Interceptor> {
+    #[next]
+    next: P,
+    read_queue: VecDeque<TaggedPacket>,
 }
