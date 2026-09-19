@@ -70,7 +70,7 @@ use webrtc::{
 #[derive(Parser, Debug)]
 #[command(version, about, long_about=None)]
 struct Opts {
-    /// Address of the signaling server (default 127.0.0.1:6969)
+    /// Address of the signaling server
     #[arg(short='a', long, default_value_t="127.0.0.1:6969".into())]
     host: String,
     /// Path to video file
@@ -132,10 +132,11 @@ async fn main_async() -> anyhow::Result<()> {
                 .open(format!("stats-{self_id}.csv"))
                 .with_context(|| format!("Cannot open or create CSV file stat-{self_id}.csv"))?,
         ));
+
         csv_file
             .lock()
             .await
-            .write(b"")
+            .write(b"PeerId,DelayMs\n")
             .context("Cannot write CSV file header")?;
         CSV_FILE
             .set(csv_file)
@@ -186,6 +187,9 @@ async fn handle_signal(
     outgoing
         .send(WsExchangeMsg::LeavePeerId(*SELF_UUID.get().unwrap()))
         .await?;
+    if let Err(e) = CSV_FILE.get().unwrap().lock().await.flush() {
+        log::warn!("Cannot flush remaining data to CSV file: {e}");
+    }
 
     Ok(())
 }
@@ -232,7 +236,7 @@ async fn handle_message(
                     .await
                     .with_context(|| format!("Cannot add new peer {peer_id}"))?,
             );
-            let start_stream_tx = add_media_to_connection(new_peer.clone())
+            let start_stream_tx = add_media_to_connection(peer_id, new_peer.clone())
                 .await
                 .with_context(|| format!("Cannot add media to {peer_id}"))?;
             OTHER_PEERS.insert(peer_id, PeerInfo::new(new_peer.clone(), start_stream_tx));
@@ -291,7 +295,7 @@ async fn handle_message(
                             })
                             .context(CONTEXT)?,
                     );
-                    let start_stream_tx = add_media_to_connection(other_peer.clone())
+                    let start_stream_tx = add_media_to_connection(from_id, other_peer.clone())
                         .await
                         .with_context(|| format!("Cannot add media to connection with {from_id}"))
                         .context(CONTEXT)?;
@@ -408,7 +412,9 @@ async fn create_empty_peer_conn(
         .context("Failed to create PeerConnection with {peer_id}")
 }
 
+/// Stream video and log stream data into the CSV file (opened in main_async).
 async fn stream_video(
+    peer_id: Uuid,
     video_track: Arc<TrackLocalStaticSample>,
     payload_type: PayloadType,
 ) -> anyhow::Result<()> {
@@ -443,7 +449,18 @@ async fn stream_video(
                 // RTT in milliseconds
                 let rtt_float: f32 =
                     ((rtt >> 16) as f32 + ((rtt & 0x0000_FFFF) as f32) / 65_536f32) * 1_000f32;
-                log::info!("RTT: {rtt_float:.3}ms");
+
+                // Since this is a BufWriter, it will take a while before the data is actually
+                // written.
+                if let Err(e) = CSV_FILE
+                    .get()
+                    .unwrap()
+                    .lock()
+                    .await
+                    .write(format!("{peer_id},{rtt_float:.3}\n").as_bytes())
+                {
+                    log::warn!("Cannot write a sample from {peer_id}: {e}");
+                };
             }
         }
     });
@@ -480,6 +497,7 @@ async fn stream_video(
 
 /// Returns, if success, the notification channel to start the video stream
 async fn add_media_to_connection(
+    peer_id: Uuid,
     peer_conn: Arc<dyn PeerConnection>,
 ) -> anyhow::Result<mpsc::Sender<()>> {
     let video_track = Arc::new(
@@ -531,7 +549,7 @@ async fn add_media_to_connection(
     tokio::spawn(async move {
         if let Some(()) = start_stream_rx.recv().await {
             log::info!("Start playing file from {}", VIDEO_FILE_NAME.get().unwrap());
-            if let Err(e) = stream_video(video_track, payload_type).await {
+            if let Err(e) = stream_video(peer_id, video_track, payload_type).await {
                 log::error!("Cannot stream video: {e:?}");
             }
         }

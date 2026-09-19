@@ -89,7 +89,7 @@ pub static VIDEO_SSRC: LazyLock<u32> = LazyLock::new(rand::random);
 pub static VIDEO_SAVE_FILE: OnceLock<Mutex<H26xWriter<BufWriter<File>>>> = OnceLock::new();
 // I really really love global states
 /// CSV file:
-/// local-timestamp,packets-received,bytes-received
+/// peer-uuid,rtt
 pub static CSV_FILE: OnceLock<Mutex<BufWriter<File>>> = OnceLock::new();
 /// <C-c> signal.
 pub static CTRLC_BROADCAST: LazyLock<broadcast::Sender<()>> = LazyLock::new(|| {
