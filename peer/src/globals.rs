@@ -2,7 +2,7 @@
 
 use dashmap::DashMap;
 use rtc::{
-    peer_connection::configuration::media_engine::MIME_TYPE_H264,
+    peer_connection::configuration::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS},
     rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters},
     // media::io::h26x_writer::H26xWriter,
 };
@@ -12,7 +12,7 @@ use std::{
     fs::File,
     io::BufWriter,
 };
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
 use webrtc::peer_connection::{
     PeerConnection, RTCConfiguration, RTCConfigurationBuilder, RTCIceServer,
@@ -27,11 +27,11 @@ pub struct PeerInfo {
     pub conn: Arc<dyn PeerConnection>,
     /// A sender to signify the track(s) related to this peer to start.
     /// Of course, you shouldn't change stuff here unless you're of module peer::globals.
-    pub start_stream_tx: mpsc::Sender<()>,
+    pub start_stream_tx: broadcast::Sender<()>,
 }
 
 impl PeerInfo {
-    pub fn new(conn: Arc<dyn PeerConnection>, start_stream_tx: mpsc::Sender<()>) -> Self {
+    pub fn new(conn: Arc<dyn PeerConnection>, start_stream_tx: broadcast::Sender<()>) -> Self {
         Self {
             conn,
             start_stream_tx,
@@ -63,7 +63,16 @@ pub static VIDEO_CODEC: LazyLock<RTCRtpCodecParameters> = LazyLock::new(|| RTCRt
     },
     // h264 or something...
     payload_type: 102,
-    ..Default::default()
+});
+pub static AUDIO_CODEC: LazyLock<RTCRtpCodecParameters> = LazyLock::new(|| RTCRtpCodecParameters {
+    rtp_codec: RTCRtpCodec {
+        mime_type: MIME_TYPE_OPUS.to_owned(),
+        clock_rate: 48_000,
+        channels: 2,
+        sdp_fmtp_line: "".to_owned(),
+        rtcp_feedback: vec![],
+    },
+    payload_type: 120,
 });
 /// The configuration shared by all peers.
 pub static PEER_CONF: LazyLock<RTCConfiguration> = LazyLock::new(|| {
@@ -81,18 +90,24 @@ pub static PEER_CONF: LazyLock<RTCConfiguration> = LazyLock::new(|| {
 });
 /// ~24fps
 pub static H26X_FRAME_DURATION: Duration = Duration::from_millis(41);
+pub static OGG_FRAME_DURATION: Duration = Duration::from_millis(20);
 /// I love global states
 pub static VIDEO_FILE_NAME: OnceLock<String> = OnceLock::new();
 /// I love global states
 pub static AUDIO_FILE_NAME: OnceLock<String> = OnceLock::new();
 // NOTE we don't handle SSRC collision for now.
 pub static VIDEO_SSRC: LazyLock<u32> = LazyLock::new(rand::random);
+// NOTE we don't handle SSRC collision for now.
+pub static AUDIO_SSRC: LazyLock<u32> = LazyLock::new(rand::random);
 // // I really love global states
 // pub static VIDEO_SAVE_FILE: OnceLock<Mutex<H26xWriter<BufWriter<File>>>> = OnceLock::new();
 // I really really love global states
 /// CSV file:
 /// peer-uuid,rtt
-pub static CSV_FILE: OnceLock<Mutex<BufWriter<File>>> = OnceLock::new();
+pub static CSV_VIDEO_FILE: OnceLock<Mutex<BufWriter<File>>> = OnceLock::new();
+/// CSV file:
+/// peer-uuid,rtt
+pub static CSV_AUDIO_FILE: OnceLock<Mutex<BufWriter<File>>> = OnceLock::new();
 /// <C-c> signal.
 pub static CTRLC_BROADCAST: LazyLock<broadcast::Sender<()>> = LazyLock::new(|| {
     let (ctrlc_tx, _) = broadcast::channel::<()>(1);

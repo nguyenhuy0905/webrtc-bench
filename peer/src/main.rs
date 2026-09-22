@@ -21,13 +21,17 @@ use futures_util::{
     SinkExt,
 };
 use globals::{
-    PeerInfo, CSV_FILE, CTRLC_BROADCAST, H26X_FRAME_DURATION, OTHER_PEERS, PEER_CONF, RUNTIME,
+    PeerInfo, AUDIO_CODEC, AUDIO_FILE_NAME, AUDIO_SSRC, CSV_AUDIO_FILE, CSV_VIDEO_FILE,
+    CTRLC_BROADCAST, H26X_FRAME_DURATION, OGG_FRAME_DURATION, OTHER_PEERS, PEER_CONF, RUNTIME,
     SELF_UUID, VIDEO_CODEC, VIDEO_FILE_NAME, VIDEO_SSRC,
 };
 // use rand::distr::Distribution as _;
 use rtc::{
     interceptor::{interceptor, Interceptor, Packet, StreamInfo, TaggedPacket},
-    media::{io::h26x_reader::sample_reader::H26xSampleReader, Sample},
+    media::{
+        io::{h26x_reader::sample_reader::H26xSampleReader, ogg_reader::OggReader},
+        Sample,
+    },
     rtcp::receiver_report::ReceiverReport,
     rtp_transceiver::{
         rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind},
@@ -45,7 +49,7 @@ use std::{
 };
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, Mutex},
+    sync::{mpsc, broadcast, Mutex},
 };
 use tokio_tungstenite::{
     tungstenite::{error::Error as TungsteniteError, protocol::Message},
@@ -125,22 +129,44 @@ async fn main_async() -> anyhow::Result<()> {
             .set(self_id)
             .expect("Somehow SELF_UUID is already set");
         log::info!("Initialize self as {self_id}");
-        let csv_file = Mutex::new(BufWriter::new(
+        let csv_video_file = Mutex::new(BufWriter::new(
             OpenOptions::new()
                 .write(true)
                 .create(true)
-                .open(format!("stats-{self_id}.csv"))
-                .with_context(|| format!("Cannot open or create CSV file stat-{self_id}.csv"))?,
+                .open(format!("stats-video-{self_id}.csv"))
+                .with_context(|| {
+                    format!("Cannot open or create CSV file stat-video-{self_id}.csv")
+                })?,
         ));
 
-        csv_file
+        csv_video_file
             .lock()
             .await
             .write(b"PeerId,DelayMs\n")
             .context("Cannot write CSV file header")?;
-        CSV_FILE
-            .set(csv_file)
-            .expect("Somehow CSV_FILE is already set");
+        CSV_VIDEO_FILE
+            .set(csv_video_file)
+            .expect("Somehow CSV_VIDEO_FILE is already set");
+        log::info!("Saving stats to stat-{self_id}.csv");
+
+        let csv_audio_file = Mutex::new(BufWriter::new(
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(format!("stats-audio-{self_id}.csv"))
+                .with_context(|| {
+                    format!("Cannot open or create CSV file stat-audio-{self_id}.csv")
+                })?,
+        ));
+
+        csv_audio_file
+            .lock()
+            .await
+            .write(b"PeerId,DelayMs\n")
+            .context("Cannot write CSV file header")?;
+        CSV_AUDIO_FILE
+            .set(csv_audio_file)
+            .expect("Somehow CSV_audio_FILE is already set");
         log::info!("Saving stats to stat-{self_id}.csv");
     } else {
         anyhow::bail!("WsExchangeMsg didn't return JoinPeerId");
@@ -187,7 +213,7 @@ async fn handle_signal(
     outgoing
         .send(WsExchangeMsg::LeavePeerId(*SELF_UUID.get().unwrap()))
         .await?;
-    if let Err(e) = CSV_FILE.get().unwrap().lock().await.flush() {
+    if let Err(e) = CSV_VIDEO_FILE.get().unwrap().lock().await.flush() {
         log::warn!("Cannot flush remaining data to CSV file: {e}");
     }
 
@@ -280,7 +306,7 @@ async fn handle_message(
             let sdp_type = sdp.sdp_type;
             match sdp_type {
                 RTCSdpType::Offer => {
-                    const CONTEXT: &'static str = "Receive and handle SDP offer";
+                    const CONTEXT: &str = "Receive and handle SDP offer";
                     log::warn!("TODO handle offer from {from_id}");
                     if OTHER_PEERS.get(&from_id).is_some() {
                         anyhow::bail!(
@@ -338,7 +364,7 @@ async fn handle_message(
                         .with_context(|| format!("Cannot send answer to {from_id}"))?;
                 }
                 RTCSdpType::Answer => {
-                    const CONTEXT: &'static str = "Receive and handle answer";
+                    const CONTEXT: &str = "Receive and handle answer";
                     log::warn!("TODO handle answer from {from_id}");
                     let other_peer = OTHER_PEERS
                         .get(&from_id)
@@ -424,7 +450,7 @@ async fn stream_video(
     let ssrc = *video_track.ssrcs().await.first().unwrap();
     // the bool means it's not H265
     let mut video_reader = H26xSampleReader::new(reader, 1024 * 1024, false);
-    let mut tick = tokio::time::interval(H26X_FRAME_DURATION);
+    let mut tick = tokio::time::interval(OGG_FRAME_DURATION);
 
     // get the RTCP RR
     let vtr = video_track.clone();
@@ -452,7 +478,7 @@ async fn stream_video(
 
                 // Since this is a BufWriter, it will take a while before the data is actually
                 // written.
-                if let Err(e) = CSV_FILE
+                if let Err(e) = CSV_VIDEO_FILE
                     .get()
                     .unwrap()
                     .lock()
@@ -495,26 +521,85 @@ async fn stream_video(
     Ok(())
 }
 
-// async fn stream_video(
-//     peer_id: Uuid,
-//     audio_track: Arc<TrackLocalStaticSample>,
-//     payload_type: PayloadType,
-// ) -> anyhow::Result<()> {
-    // let file = File::open(AUDIO_FILE_NAME.get().unwrap()).context("Cannot open OGG file")?;
-    // let reader = BufReader::new(file);
-    // // really, you must've had SSRC here already
-    // let ssrc = *audio_track.ssrcs().await.first().unwrap();
-    // // the bool means it's not H265
-    // let mut audio_reader = H26xSampleReader::new(reader, 1024 * 1024, false);
-    // let mut tick = tokio::time::interval(H26X_FRAME_DURATION);
+async fn stream_audio(
+    peer_id: Uuid,
+    audio_track: Arc<TrackLocalStaticSample>,
+    payload_type: PayloadType,
+) -> anyhow::Result<()> {
+    let file = File::open(AUDIO_FILE_NAME.get().unwrap()).context("Cannot open OGG file")?;
+    let reader = BufReader::new(file);
+    // really, you must've had SSRC here already
+    let ssrc = *audio_track.ssrcs().await.first().unwrap();
+    // The bool means it does checksum
+    let (mut audio_reader, _) = OggReader::new(reader, true).context("Cannot read OGG file")?;
+    let mut tick = tokio::time::interval(H26X_FRAME_DURATION);
 
-// }
+    // get the RTCP RR
+    let atr = audio_track.clone();
+    tokio::spawn(async move {
+        let audio_track = atr;
+        while let Some(TrackLocalEvent::OnRtcpPacket(packets)) = audio_track.poll().await {
+            for packet in packets {
+                let now = (SystemInstant::now().ntp(Instant::now()) >> 16) as u32;
+                let Some(rr) = packet.as_any().downcast_ref::<ReceiverReport>() else {
+                    continue;
+                };
+                let Some(report) = rr.reports.first() else {
+                    continue;
+                };
+                // no SR sent yet. Can't do much.
+                if report.last_sender_report == 0 && report.delay == 0 {
+                    continue;
+                }
+                // middle NTP of current instant.
+                // formula in RFC3350, section 6.4.2
+                let rtt = now - report.delay - report.last_sender_report;
+                // RTT in milliseconds
+                let rtt_float: f32 =
+                    ((rtt >> 16) as f32 + ((rtt & 0x0000_FFFF) as f32) / 65_536f32) * 1_000f32;
+
+                // Since this is a BufWriter, it will take a while before the data is actually
+                // written.
+                if let Err(e) = CSV_AUDIO_FILE
+                    .get()
+                    .unwrap()
+                    .lock()
+                    .await
+                    .write(format!("{peer_id},{rtt_float:.3}\n").as_bytes())
+                {
+                    log::warn!("Cannot write a sample from {peer_id}: {e}");
+                };
+            }
+        }
+    });
+
+    let mut last_granule: u64 = 0;
+    // send da audio
+    while let Ok((page_data, page_header)) = audio_reader.parse_next_page() {
+        let sample_count = page_header.granule_position - last_granule;
+        last_granule = page_header.granule_position;
+        let sample_duration = Duration::from_millis(sample_count * 1000 / 48000);
+
+        audio_track
+            .sample_writer(ssrc, payload_type)
+            .write_sample(&Sample {
+                data: page_data.freeze(),
+                duration: sample_duration,
+                ..Default::default()
+            })
+            .await?;
+
+        let _ = tick.tick().await;
+    }
+
+    Ok(())
+}
 
 /// Returns, if success, the notification channel to start the video stream
 async fn add_media_to_connection(
     peer_id: Uuid,
     peer_conn: Arc<dyn PeerConnection>,
-) -> anyhow::Result<mpsc::Sender<()>> {
+) -> anyhow::Result<broadcast::Sender<()>> {
     let video_track = Arc::new(
         TrackLocalStaticSample::new(MediaStreamTrack::new(
             // TODO: these, as suggested by the specs, should be UUIDs.
@@ -535,11 +620,25 @@ async fn add_media_to_connection(
                 ..Default::default()
             }],
         ))
-        .with_context(|| format!("Cannot create video track"))?,
+        .context("Cannot create video track")?,
     );
+    let audio_track = Arc::new(TrackLocalStaticSample::new(MediaStreamTrack::new(
+        format!("audio-stream-{}", rand::random::<u32>()),
+        format!("audio-track-{}", rand::random::<u32>()),
+        "Audio track".to_owned(),
+        RtpCodecKind::Audio,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(*AUDIO_SSRC),
+                ..Default::default()
+            },
+            codec: AUDIO_CODEC.rtp_codec.clone(),
+            ..Default::default()
+        }],
+    )).context("Cannot create audio track")?);
 
     // notify when to start a stream
-    let (start_stream_tx, mut start_stream_rx) = mpsc::channel::<()>(1);
+    let (start_stream_tx, mut start_stream_rx) = broadcast::channel::<()>(1);
 
     log::debug!("Adding track...");
     let sender = peer_conn
@@ -561,8 +660,10 @@ async fn add_media_to_connection(
         })?;
 
     // then spawn a stream sending video
+    let sub = start_stream_tx.clone();
     tokio::spawn(async move {
-        if let Some(()) = start_stream_rx.recv().await {
+        let mut start_stream_rx = sub.subscribe();
+        if let Ok(()) = start_stream_rx.recv().await {
             log::info!("Start playing file from {}", VIDEO_FILE_NAME.get().unwrap());
             if let Err(e) = stream_video(peer_id, video_track, payload_type).await {
                 log::error!("Cannot stream video: {e:?}");
@@ -571,6 +672,14 @@ async fn add_media_to_connection(
     });
 
     // and a stream sending audio
+    tokio::spawn(async move {
+        if let Ok(()) = start_stream_rx.recv().await {
+            log::info!("Start playing file from {}", VIDEO_FILE_NAME.get().unwrap());
+            if let Err(e) = stream_audio(peer_id, audio_track, payload_type).await {
+                log::error!("Cannot stream video: {e:?}");
+            }
+        }
+    });
 
     Ok(start_stream_tx)
 }

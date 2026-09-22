@@ -21,7 +21,7 @@ use std::{
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use webrtc::{
-    media_stream::track_remote::{TrackRemote, TrackRemoteEvent},
+    media_stream::track_remote::{TrackRemote},
     peer_connection::{
         PeerConnectionEventHandler, RTCPeerConnectionIceEvent, RTCPeerConnectionState,
         // RTCStatsReportEntry,
@@ -104,18 +104,19 @@ impl PeerConnectionEventHandler for WebRtcHandler {
         }
 
         tokio::spawn(async move {
-            while let Some(evt) = track.poll().await {
-                match evt {
-                    TrackRemoteEvent::OnRtpPacket(_) => {
-                        // let mut w = crate::globals::VIDEO_SAVE_FILE.get().unwrap().lock().await;
-                        // if let Err(err) = w.write_rtp(&packet) {
-                        //     println!("video write_rtp error: {err}");
-                        //     break;
-                        // }
-                    }
-                    _ => {}
-                }
-            }
+            while track.poll().await.is_some() {}
+            // while let Some(evt) = track.poll().await {
+            //     match evt {
+            //         TrackRemoteEvent::OnRtpPacket(_) => {
+            //             // let mut w = crate::globals::VIDEO_SAVE_FILE.get().unwrap().lock().await;
+            //             // if let Err(err) = w.write_rtp(&packet) {
+            //             //     println!("video write_rtp error: {err}");
+            //             //     break;
+            //             // }
+            //         }
+            //         _ => {}
+            //     }
+            // }
         });
     }
 
@@ -124,13 +125,12 @@ impl PeerConnectionEventHandler for WebRtcHandler {
             return;
         }
 
-        if let Some(kv) = OTHER_PEERS.get(&self.other_peer_id) {
-            if let Err(e) = kv.value().start_stream_tx.send(()).await {
+        if let Some(kv) = OTHER_PEERS.get(&self.other_peer_id)
+            && let Err(e) = kv.value().start_stream_tx.send(()) {
                 log::warn!(
                     "Cannot send start stream signal for connection with {}: {e}",
                     self.other_peer_id
                 );
-            }
             // connected. TODO: Start logging stats
         }
     }

@@ -126,8 +126,8 @@ async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::R
                     }
                 },
             };
-            match &msg {
-                &WsExchangeMsg::Sdp { from_id, to_id, .. } => {
+            match msg {
+                WsExchangeMsg::Sdp { from_id, to_id, .. } => {
                     log::trace!("SDP from {from_id} to {to_id}");
                     if PEER_UUID_AND_SENDER.get(&from_id).is_none() {
                         log::warn!("From-peer {from_id} does not exist (anymore). Skipping...");
@@ -145,7 +145,7 @@ async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::R
                         }
                     }
                 }
-                &WsExchangeMsg::IceCandidate {
+                WsExchangeMsg::IceCandidate {
                     from_id,
                     to_id,
                     ..
@@ -179,7 +179,7 @@ async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::R
                         }
                     }
                 }
-                &WsExchangeMsg::LeavePeerId(uuid) => {
+                WsExchangeMsg::LeavePeerId(uuid) => {
                     // remove peer first...
                     match PEER_ADDR_AND_UUID.get(&addr) {
                         None => {

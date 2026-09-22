@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use webrtc::peer_connection::{RTCIceCandidateInit, RTCSessionDescription};
 
+#[expect(clippy::large_enum_variant)]
 /// Message(s) to be exchanged via WebSocket between the signaling server and any peer.
 /// We assume 1 channel only, and each peer only has 1 SDP offer. Hopefully adding more than
 /// 1 channel isn't going to be difficult.
