@@ -15,7 +15,7 @@ use std::{
 use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
 use webrtc::peer_connection::{
-    PeerConnection, RTCConfiguration, RTCConfigurationBuilder, RTCIceServer,
+    PeerConnection, RTCConfiguration,
 };
 
 /// To be allocated by the signaling server.
@@ -75,19 +75,7 @@ pub static AUDIO_CODEC: LazyLock<RTCRtpCodecParameters> = LazyLock::new(|| RTCRt
     payload_type: 120,
 });
 /// The configuration shared by all peers.
-pub static PEER_CONF: LazyLock<RTCConfiguration> = LazyLock::new(|| {
-    RTCConfigurationBuilder::new()
-        .with_ice_servers(vec![RTCIceServer {
-            // TURN
-            // urls: vec!["turn:127.0.0.1:3478?transport=udp".to_owned()],
-            // username: "lenin".to_owned(),
-            // credential: "lenin420".to_owned(),
-            // STUN
-            urls: vec!["stun:0.0.0.0:8080".to_string()],
-            ..Default::default()
-        }])
-        .build()
-});
+pub static PEER_CONF: OnceLock<RTCConfiguration> = OnceLock::new();
 /// ~24fps
 pub static H26X_FRAME_DURATION: Duration = Duration::from_millis(41);
 pub static OGG_FRAME_DURATION: Duration = Duration::from_millis(20);

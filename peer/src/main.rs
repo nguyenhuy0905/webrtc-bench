@@ -49,7 +49,7 @@ use std::{
 };
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, broadcast, Mutex},
+    sync::{broadcast, mpsc, Mutex},
 };
 use tokio_tungstenite::{
     tungstenite::{error::Error as TungsteniteError, protocol::Message},
@@ -64,7 +64,8 @@ use webrtc::{
     },
     peer_connection::{
         register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
-        RTCSdpType, RTCSessionDescription, RTCSignalingState, Registry,
+        RTCConfigurationBuilder, RTCIceServer, RTCSdpType, RTCSessionDescription,
+        RTCSignalingState, Registry,
     },
 };
 
@@ -72,8 +73,8 @@ use webrtc::{
 #[command(version, about, long_about=None)]
 struct Opts {
     /// Address of the signaling server
-    #[arg(short='a', long, default_value_t="127.0.0.1:6969".into())]
-    host: String,
+    #[arg(short='s', long, default_value_t="0.0.0.0:6969".into())]
+    signal_sever: String,
     /// Path to video file
     #[arg(short='p', long, default_value_t="input.h264".into())]
     video_file: String,
@@ -83,6 +84,9 @@ struct Opts {
     /// Audio file to play. `g` stands for "Geräusch"
     #[arg(short='g', long, default_value_t="input.ogg".into())]
     audio_file: String,
+    /// Default ICE server for this peer
+    #[arg(short='i', long, default_value_t="stun:stun.l.google.com:19302".to_owned())]
+    default_ice: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -97,6 +101,18 @@ async fn main_async() -> anyhow::Result<()> {
     // initialize some stuff
     globals::VIDEO_FILE_NAME.get_or_init(|| args.video_file);
     globals::AUDIO_FILE_NAME.get_or_init(|| args.audio_file);
+    PEER_CONF
+        .set(
+            RTCConfigurationBuilder::new()
+                .with_ice_servers(vec![RTCIceServer {
+                    // STUN
+                    urls: vec![args.default_ice],
+                    ..Default::default()
+                }])
+                .build(),
+        )
+        .unwrap();
+
     // let file = OpenOptions::new()
     //     .write(true)
     //     .create(true)
@@ -108,7 +124,8 @@ async fn main_async() -> anyhow::Result<()> {
     // connect to signaling server
     // this will tell the signaling server that this peer wants to join the channel. Currently,
     // there's only one channel to join.
-    let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{}", args.host)).await?;
+    let (ws_stream, _) =
+        tokio_tungstenite::connect_async(format!("ws://{}", args.signal_sever)).await?;
     let (write_stream, mut read_stream) = ws_stream.split();
 
     // then we can initialize our PeerID.
@@ -435,7 +452,7 @@ async fn create_empty_peer_conn(
     let registry = registry.with(RTCPFwdInterceptor::new);
 
     PeerConnectionBuilder::new()
-        .with_configuration(PEER_CONF.clone())
+        .with_configuration(PEER_CONF.get().unwrap().clone())
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
         .with_handler(Arc::new(handle::WebRtcHandler::new(peer_id, outgoing)))
@@ -629,20 +646,23 @@ async fn add_media_to_connection(
         ))
         .context("Cannot create video track")?,
     );
-    let audio_track = Arc::new(TrackLocalStaticSample::new(MediaStreamTrack::new(
-        format!("audio-stream-{}", rand::random::<u32>()),
-        format!("audio-track-{}", rand::random::<u32>()),
-        "Audio track".to_owned(),
-        RtpCodecKind::Audio,
-        vec![RTCRtpEncodingParameters {
-            rtp_coding_parameters: RTCRtpCodingParameters {
-                ssrc: Some(*AUDIO_SSRC),
+    let audio_track = Arc::new(
+        TrackLocalStaticSample::new(MediaStreamTrack::new(
+            format!("audio-stream-{}", rand::random::<u32>()),
+            format!("audio-track-{}", rand::random::<u32>()),
+            "Audio track".to_owned(),
+            RtpCodecKind::Audio,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(*AUDIO_SSRC),
+                    ..Default::default()
+                },
+                codec: AUDIO_CODEC.rtp_codec.clone(),
                 ..Default::default()
-            },
-            codec: AUDIO_CODEC.rtp_codec.clone(),
-            ..Default::default()
-        }],
-    )).context("Cannot create audio track")?);
+            }],
+        ))
+        .context("Cannot create audio track")?,
+    );
 
     // notify when to start a stream
     let (start_stream_tx, mut start_stream_rx) = broadcast::channel::<()>(1);
@@ -689,7 +709,10 @@ async fn add_media_to_connection(
     tokio::spawn(async move {
         let mut start_stream_rx = sub.subscribe();
         if let Ok(()) = start_stream_rx.recv().await {
-            log::info!("Start playing video from {}", VIDEO_FILE_NAME.get().unwrap());
+            log::info!(
+                "Start playing video from {}",
+                VIDEO_FILE_NAME.get().unwrap()
+            );
             if let Err(e) = stream_video(peer_id, video_track, video_payload_type).await {
                 log::error!("Cannot stream video: {e:?}");
             }
@@ -699,7 +722,10 @@ async fn add_media_to_connection(
     // and a stream sending audio
     tokio::spawn(async move {
         if let Ok(()) = start_stream_rx.recv().await {
-            log::info!("Start playing audio from {}", AUDIO_FILE_NAME.get().unwrap());
+            log::info!(
+                "Start playing audio from {}",
+                AUDIO_FILE_NAME.get().unwrap()
+            );
             if let Err(e) = stream_audio(peer_id, audio_track, audio_payload_type).await {
                 log::error!("Cannot stream audio: {e:?}");
             }

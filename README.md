@@ -57,7 +57,7 @@ run0 ufw reload
 
 ### STUN or TURN
 - We use this thing called [coturn](https://github.com/coturn/coturn) for the TURN and STUN servers.
-- For STUN, `turnserver -S -p 3478` works fine.
+- For STUN, `turnserver -S -p 8080` works fine.
 For TURN:
     - First, generate a key-pair, PEM format. Check `openssl-genpkey`. For the example command below, these are `turn_key` and `turn_key.pub`.
     - Then, use the private key to sign a X.509 certificate. Check `openssl-x509`. For the example command below, it's `turn_cert.pem`
@@ -71,7 +71,7 @@ sqlite3 test_user_db.sql < /usr/share/turnserver/schema.sql
 # add user
 turnadmin -b test_user_db.sql -a -u lenin -r soviet.russia -p lenin420
 # run server
-turnserver -b test_user_db.sql -a --cert turn_cert.pem --pkey turn_key -p 3478 -L 127.0.0.1 -r soviet.russia
+turnserver -b test_user_db.sql -a --cert turn_cert.pem --pkey turn_key -p 8080 -L 127.0.0.1 -r soviet.russia
 ```
 
 ## Setup for peers/clients
