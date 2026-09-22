@@ -285,8 +285,8 @@ async fn remove_peer_addr(addr: &SocketAddr) {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about=None)]
 struct Opts {
-    /// Address to bind (default 127.0.0.1:6969)
-    #[arg(short='a', long, default_value_t="127.0.0.1:6969".into())]
+    /// Address to bind
+    #[arg(short='a', long, default_value_t="0.0.0.0:6969".into())]
     host: String,
 }
 
