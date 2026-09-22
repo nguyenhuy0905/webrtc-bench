@@ -27,10 +27,7 @@ use globals::{
 // use rand::distr::Distribution as _;
 use rtc::{
     interceptor::{interceptor, Interceptor, Packet, StreamInfo, TaggedPacket},
-    media::{
-        io::{h26x_reader::sample_reader::H26xSampleReader, h26x_writer::H26xWriter},
-        Sample,
-    },
+    media::{io::h26x_reader::sample_reader::H26xSampleReader, Sample},
     rtcp::receiver_report::ReceiverReport,
     rtp_transceiver::{
         rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind},
@@ -77,8 +74,10 @@ struct Opts {
     #[arg(short='p', long, default_value_t="input.h264".into())]
     video_file: String,
     // /// Save video to file
-    #[arg(short='s', long, default_value_t=format!("save-video-{}.h264", Uuid::new_v4()))]
-    video_save_to_file: String,
+    // #[arg(short='s', long, default_value_t=format!("save-video-{}.h264", Uuid::new_v4()))]
+    // video_save_to_file: String,
+    #[arg(short='a', long, default_value_t="input.ogg".into())]
+    audio_file: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -92,13 +91,14 @@ async fn main_async() -> anyhow::Result<()> {
 
     // initialize some stuff
     globals::VIDEO_FILE_NAME.get_or_init(|| args.video_file);
-    let file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(&args.video_save_to_file)
-        .with_context(|| format!("Cannot open file {}", args.video_save_to_file))?;
-    globals::VIDEO_SAVE_FILE
-        .get_or_init(|| Mutex::new(H26xWriter::new(BufWriter::new(file), false)));
+    globals::AUDIO_FILE_NAME.get_or_init(|| args.audio_file);
+    // let file = OpenOptions::new()
+    //     .write(true)
+    //     .create(true)
+    //     .open(&args.video_save_to_file)
+    //     .with_context(|| format!("Cannot open file {}", args.video_save_to_file))?;
+    // globals::VIDEO_SAVE_FILE
+    //     .get_or_init(|| Mutex::new(H26xWriter::new(BufWriter::new(file), false)));
 
     // connect to signaling server
     // this will tell the signaling server that this peer wants to join the channel. Currently,
@@ -495,6 +495,21 @@ async fn stream_video(
     Ok(())
 }
 
+// async fn stream_video(
+//     peer_id: Uuid,
+//     audio_track: Arc<TrackLocalStaticSample>,
+//     payload_type: PayloadType,
+// ) -> anyhow::Result<()> {
+    // let file = File::open(AUDIO_FILE_NAME.get().unwrap()).context("Cannot open OGG file")?;
+    // let reader = BufReader::new(file);
+    // // really, you must've had SSRC here already
+    // let ssrc = *audio_track.ssrcs().await.first().unwrap();
+    // // the bool means it's not H265
+    // let mut audio_reader = H26xSampleReader::new(reader, 1024 * 1024, false);
+    // let mut tick = tokio::time::interval(H26X_FRAME_DURATION);
+
+// }
+
 /// Returns, if success, the notification channel to start the video stream
 async fn add_media_to_connection(
     peer_id: Uuid,
@@ -554,6 +569,8 @@ async fn add_media_to_connection(
             }
         }
     });
+
+    // and a stream sending audio
 
     Ok(start_stream_tx)
 }

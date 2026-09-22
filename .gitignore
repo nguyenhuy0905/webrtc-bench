@@ -12,6 +12,7 @@
 # ctags
 /tags
 **.h264
+**.ogg
 /**.log
 **.webm
 **.csv
