@@ -214,7 +214,10 @@ async fn handle_signal(
         .send(WsExchangeMsg::LeavePeerId(*SELF_UUID.get().unwrap()))
         .await?;
     if let Err(e) = CSV_VIDEO_FILE.get().unwrap().lock().await.flush() {
-        log::warn!("Cannot flush remaining data to CSV file: {e}");
+        log::warn!("Cannot flush remaining data to video data CSV file: {e}");
+    }
+    if let Err(e) = CSV_AUDIO_FILE.get().unwrap().lock().await.flush() {
+        log::warn!("Cannot flush remaining data to audio data CSV file: {e}");
     }
 
     Ok(())
