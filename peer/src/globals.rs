@@ -83,7 +83,7 @@ pub static PEER_CONF: LazyLock<RTCConfiguration> = LazyLock::new(|| {
             // username: "lenin".to_owned(),
             // credential: "lenin420".to_owned(),
             // STUN
-            urls: vec!["stun:0.0.0.0:3478".to_string()],
+            urls: vec!["stun:0.0.0.0:8080".to_string()],
             ..Default::default()
         }])
         .build()

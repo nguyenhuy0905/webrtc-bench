@@ -46,8 +46,8 @@ find `PEER_CONF`, and change the `urls`, listed a few lines below.
 # run0 does the same thing as sudo here, so if it doesn't work on your setup,
 # just replace with sudo
 run0 ufw enable
-run0 ufw allow 3478/udp
-run0 ufw allow 6969/udp
+run0 ufw allow 8080/udp
+run0 ufw allow 6969/tcp
 run0 ufw reload
 ```
 
