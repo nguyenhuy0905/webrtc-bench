@@ -147,7 +147,7 @@ async fn main_async() -> anyhow::Result<()> {
         CSV_VIDEO_FILE
             .set(csv_video_file)
             .expect("Somehow CSV_VIDEO_FILE is already set");
-        log::info!("Saving stats to stat-{self_id}.csv");
+        log::info!("Saving stats to stat-video-{self_id}.csv");
 
         let csv_audio_file = Mutex::new(BufWriter::new(
             OpenOptions::new()
@@ -167,7 +167,7 @@ async fn main_async() -> anyhow::Result<()> {
         CSV_AUDIO_FILE
             .set(csv_audio_file)
             .expect("Somehow CSV_audio_FILE is already set");
-        log::info!("Saving stats to stat-{self_id}.csv");
+        log::info!("Saving stats to stat-audio-{self_id}.csv");
     } else {
         anyhow::bail!("WsExchangeMsg didn't return JoinPeerId");
     }
@@ -422,6 +422,9 @@ async fn create_empty_peer_conn(
     media_engine
         .register_codec(VIDEO_CODEC.clone(), RtpCodecKind::Video)
         .context("Cannot register H264 codec")?;
+    media_engine
+        .register_codec(AUDIO_CODEC.clone(), RtpCodecKind::Audio)
+        .context("Cannot register OPUS codec")?;
     // let registry = configure_rtcp_reports(Registry::new());
     let registry = register_default_interceptors(Registry::new(), &mut media_engine)
         .context("Cannot register interceptor")?;
@@ -641,12 +644,17 @@ async fn add_media_to_connection(
     let (start_stream_tx, mut start_stream_rx) = broadcast::channel::<()>(1);
 
     log::debug!("Adding track...");
-    let sender = peer_conn
+    let video_sender = peer_conn
         .add_track(video_track.clone())
         .await
         .context("Cannot add track to peer connection")?;
 
-    let payload_type = sender
+    let audio_sender = peer_conn
+        .add_track(audio_track.clone())
+        .await
+        .context("Cannot add track to peer connection")?;
+
+    let video_payload_type = video_sender
         .get_parameters()
         .await
         .map_err(|e| anyhow::anyhow!(e))
@@ -656,7 +664,20 @@ async fn add_media_to_connection(
                 .codecs
                 .first()
                 .map(|codec| codec.payload_type)
-                .ok_or_else(|| anyhow::anyhow!("No negotiated codec!"))
+                .ok_or_else(|| anyhow::anyhow!("No negotiated video codec!"))
+        })?;
+
+    let audio_payload_type = audio_sender
+        .get_parameters()
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .and_then(|negotiate| {
+            negotiate
+                .rtp_parameters
+                .codecs
+                .first()
+                .map(|codec| codec.payload_type)
+                .ok_or_else(|| anyhow::anyhow!("No negotiated audio codec!"))
         })?;
 
     // then spawn a stream sending video
@@ -664,8 +685,8 @@ async fn add_media_to_connection(
     tokio::spawn(async move {
         let mut start_stream_rx = sub.subscribe();
         if let Ok(()) = start_stream_rx.recv().await {
-            log::info!("Start playing file from {}", VIDEO_FILE_NAME.get().unwrap());
-            if let Err(e) = stream_video(peer_id, video_track, payload_type).await {
+            log::info!("Start playing video from {}", VIDEO_FILE_NAME.get().unwrap());
+            if let Err(e) = stream_video(peer_id, video_track, video_payload_type).await {
                 log::error!("Cannot stream video: {e:?}");
             }
         }
@@ -674,9 +695,9 @@ async fn add_media_to_connection(
     // and a stream sending audio
     tokio::spawn(async move {
         if let Ok(()) = start_stream_rx.recv().await {
-            log::info!("Start playing file from {}", VIDEO_FILE_NAME.get().unwrap());
-            if let Err(e) = stream_audio(peer_id, audio_track, payload_type).await {
-                log::error!("Cannot stream video: {e:?}");
+            log::info!("Start playing audio from {}", AUDIO_FILE_NAME.get().unwrap());
+            if let Err(e) = stream_audio(peer_id, audio_track, audio_payload_type).await {
+                log::error!("Cannot stream audio: {e:?}");
             }
         }
     });
