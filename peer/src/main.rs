@@ -80,7 +80,8 @@ struct Opts {
     // /// Save video to file
     // #[arg(short='s', long, default_value_t=format!("save-video-{}.h264", Uuid::new_v4()))]
     // video_save_to_file: String,
-    #[arg(short='a', long, default_value_t="input.ogg".into())]
+    /// Audio file to play. `g` stands for "Geräusch"
+    #[arg(short='g', long, default_value_t="input.ogg".into())]
     audio_file: String,
 }
 
