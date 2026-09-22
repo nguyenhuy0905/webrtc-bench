@@ -17,25 +17,25 @@ use anyhow::Context;
 use clap::Parser;
 use common::WsExchangeMsg;
 use futures_util::{
-    stream::{SplitSink, SplitStream, StreamExt},
     SinkExt,
+    stream::{SplitSink, SplitStream, StreamExt},
 };
 use globals::{
-    PeerInfo, AUDIO_CODEC, AUDIO_FILE_NAME, AUDIO_SSRC, CSV_AUDIO_FILE, CSV_VIDEO_FILE,
-    CTRLC_BROADCAST, H26X_FRAME_DURATION, OGG_FRAME_DURATION, OTHER_PEERS, PEER_CONF, RUNTIME,
-    SELF_UUID, VIDEO_CODEC, VIDEO_FILE_NAME, VIDEO_SSRC,
+    AUDIO_CODEC, AUDIO_FILE_NAME, AUDIO_SSRC, CSV_AUDIO_FILE, CSV_VIDEO_FILE, CTRLC_BROADCAST,
+    H26X_FRAME_DURATION, OGG_FRAME_DURATION, OTHER_PEERS, PEER_CONF, PeerInfo, RUNTIME, SELF_UUID,
+    VIDEO_CODEC, VIDEO_FILE_NAME, VIDEO_SSRC,
 };
 // use rand::distr::Distribution as _;
 use rtc::{
-    interceptor::{interceptor, Interceptor, Packet, StreamInfo, TaggedPacket},
+    interceptor::{Interceptor, Packet, StreamInfo, TaggedPacket, interceptor},
     media::{
-        io::{h26x_reader::sample_reader::H26xSampleReader, ogg_reader::OggReader},
         Sample,
+        io::{h26x_reader::sample_reader::H26xSampleReader, ogg_reader::OggReader},
     },
     rtcp::receiver_report::ReceiverReport,
     rtp_transceiver::{
-        rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind},
         PayloadType,
+        rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind},
     },
     sansio,
     shared::{error::Error, time::SystemInstant},
@@ -49,23 +49,23 @@ use std::{
 };
 use tokio::{
     net::TcpStream,
-    sync::{broadcast, mpsc, Mutex},
+    sync::{Mutex, broadcast, mpsc},
 };
 use tokio_tungstenite::{
-    tungstenite::{error::Error as TungsteniteError, protocol::Message},
     MaybeTlsStream, WebSocketStream,
+    tungstenite::{error::Error as TungsteniteError, protocol::Message},
 };
 use uuid::Uuid;
 #[allow(unused)]
 use webrtc::{
     media_stream::{
-        track_local::{static_sample::TrackLocalStaticSample, TrackLocal as _, TrackLocalEvent},
         MediaStreamTrack, Track,
+        track_local::{TrackLocal as _, TrackLocalEvent, static_sample::TrackLocalStaticSample},
     },
     peer_connection::{
-        register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
-        RTCConfigurationBuilder, RTCIceServer, RTCSdpType, RTCSessionDescription,
-        RTCSignalingState, Registry,
+        MediaEngine, PeerConnection, PeerConnectionBuilder, RTCConfigurationBuilder, RTCIceServer,
+        RTCSdpType, RTCSessionDescription, RTCSignalingState, Registry,
+        register_default_interceptors,
     },
 };
 
@@ -78,9 +78,6 @@ struct Opts {
     /// Path to video file
     #[arg(short='p', long, default_value_t="input.h264".into())]
     video_file: String,
-    // /// Save video to file
-    // #[arg(short='s', long, default_value_t=format!("save-video-{}.h264", Uuid::new_v4()))]
-    // video_save_to_file: String,
     /// Audio file to play. `g` stands for "Geräusch"
     #[arg(short='g', long, default_value_t="input.ogg".into())]
     audio_file: String,
@@ -112,14 +109,6 @@ async fn main_async() -> anyhow::Result<()> {
                 .build(),
         )
         .unwrap();
-
-    // let file = OpenOptions::new()
-    //     .write(true)
-    //     .create(true)
-    //     .open(&args.video_save_to_file)
-    //     .with_context(|| format!("Cannot open file {}", args.video_save_to_file))?;
-    // globals::VIDEO_SAVE_FILE
-    //     .get_or_init(|| Mutex::new(H26xWriter::new(BufWriter::new(file), false)));
 
     // connect to signaling server
     // this will tell the signaling server that this peer wants to join the channel. Currently,
@@ -376,8 +365,8 @@ async fn handle_message(
                                 .await
                                 .ok_or_else(|| {
                                     anyhow::anyhow!(
-                                    "Cannot query local description for connection to {from_id}"
-                                )
+                                        "Cannot query local description for connection to {from_id}"
+                                    )
                                 })
                                 .context(CONTEXT)?,
                         })

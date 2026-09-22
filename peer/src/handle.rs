@@ -2,9 +2,9 @@
 use crate::globals::{OTHER_PEERS, SELF_UUID, VIDEO_SSRC};
 use common::WsExchangeMsg;
 use rtc::{
-    // media::io::Writer,
+    media::io::{Writer as _, h26x_writer::H26xWriter, ogg_writer::OggWriter},
     // peer_connection::configuration::media_engine::MIME_TYPE_H264,
-    rtcp::{payload_feedbacks::picture_loss_indication::PictureLossIndication},
+    rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication,
     rtp_transceiver::rtp_sender::RtpCodecKind,
     // statistics::{
     //     stats::rtp_stream::{
@@ -15,15 +15,19 @@ use rtc::{
     // },
 };
 use std::{
+    fs::{File, OpenOptions},
+    io::BufWriter,
     sync::Arc,
-    time::{Duration},
+    time::Duration,
 };
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use webrtc::{
-    media_stream::track_remote::{TrackRemote},
+    media_stream::track_remote::{TrackRemote, TrackRemoteEvent},
     peer_connection::{
-        PeerConnectionEventHandler, RTCPeerConnectionIceEvent, RTCPeerConnectionState,
+        PeerConnectionEventHandler,
+        RTCPeerConnectionIceEvent,
+        RTCPeerConnectionState,
         // RTCStatsReportEntry,
     },
 };
@@ -78,11 +82,32 @@ impl PeerConnectionEventHandler for WebRtcHandler {
             .await
             .first()
             .expect("track should expose SSRCs before on_track");
-        log::info!("On track with {}, SSRC {}", self.other_peer_id, media_ssrc);
+        log::info!(
+            "On track with {}, SSRC {}, {:?}",
+            self.other_peer_id,
+            media_ssrc,
+            kind
+        );
 
-        // Send PLI every 3 seconds for video tracks to request keyframes
         if kind == RtpCodecKind::Video {
+            let mut video_save: H26xWriter<BufWriter<File>> = H26xWriter::new(
+                BufWriter::new(
+                    OpenOptions::new()
+                        .create(true)
+                        .truncate(true)
+                        .write(true)
+                        .open(format!(
+                            "save-video-{}-{}.h264",
+                            *SELF_UUID.get().unwrap(),
+                            self.other_peer_id
+                        ))
+                        .expect("cannot open video file to save"),
+                ),
+                false,
+            );
+            log::info!("Saving video");
             let pli_track = track.clone();
+            // Send PLI every 3 seconds for video tracks to request keyframes
             tokio::spawn(Box::pin(async move {
                 let mut result = webrtc::error::Result::<()>::Ok(());
                 while result.is_ok() {
@@ -99,25 +124,49 @@ impl PeerConnectionEventHandler for WebRtcHandler {
                         }
                     }
                 }
-                // log::warn!("Cannot send PLI anymore");
             }));
-        }
 
-        tokio::spawn(async move {
-            while track.poll().await.is_some() {}
-            // while let Some(evt) = track.poll().await {
-            //     match evt {
-            //         TrackRemoteEvent::OnRtpPacket(_) => {
-            //             // let mut w = crate::globals::VIDEO_SAVE_FILE.get().unwrap().lock().await;
-            //             // if let Err(err) = w.write_rtp(&packet) {
-            //             //     println!("video write_rtp error: {err}");
-            //             //     break;
-            //             // }
-            //         }
-            //         _ => {}
-            //     }
-            // }
-        });
+            tokio::spawn(async move {
+                while let Some(evt) = track.poll().await {
+                    if let TrackRemoteEvent::OnRtpPacket(packet) = evt
+                        && let Err(err) = video_save.write_rtp(&packet)
+                    {
+                        println!("video write_rtp error: {err}");
+                        break;
+                    }
+                }
+            });
+        } else {
+            // audio
+            let mut audio_save: OggWriter<BufWriter<File>> = OggWriter::new(
+                BufWriter::new(
+                    OpenOptions::new()
+                        .create(true)
+                        .truncate(true)
+                        .write(true)
+                        .open(format!(
+                            "save-audio-{}-{}.ogg",
+                            *SELF_UUID.get().unwrap(),
+                            self.other_peer_id
+                        ))
+                        .expect("cannot open audio file to save"),
+                ),
+                48_000,
+                2,
+            )
+            .expect("cannot open OPUS writer");
+            log::info!("Saving audio");
+            tokio::spawn(async move {
+                while let Some(evt) = track.poll().await {
+                    if let TrackRemoteEvent::OnRtpPacket(packet) = evt
+                        && let Err(err) = audio_save.write_rtp(&packet)
+                    {
+                        println!("audio write_rtp error: {err}");
+                        break;
+                    }
+                }
+            });
+        }
     }
 
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
@@ -126,11 +175,12 @@ impl PeerConnectionEventHandler for WebRtcHandler {
         }
 
         if let Some(kv) = OTHER_PEERS.get(&self.other_peer_id)
-            && let Err(e) = kv.value().start_stream_tx.send(()) {
-                log::warn!(
-                    "Cannot send start stream signal for connection with {}: {e}",
-                    self.other_peer_id
-                );
+            && let Err(e) = kv.value().start_stream_tx.send(())
+        {
+            log::warn!(
+                "Cannot send start stream signal for connection with {}: {e}",
+                self.other_peer_id
+            );
             // connected. TODO: Start logging stats
         }
     }

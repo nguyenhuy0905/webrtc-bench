@@ -3,17 +3,14 @@ use anyhow::Context;
 use clap::Parser;
 use common::WsExchangeMsg;
 use dashmap::DashMap;
-use futures_util::{
-    stream::{StreamExt},
-    SinkExt,
-};
+use futures_util::{SinkExt, stream::StreamExt};
 use serde_json::error::Category;
 use std::{net::SocketAddr, pin::Pin, sync::LazyLock};
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{mpsc},
+    sync::mpsc,
 };
-use tokio_tungstenite::tungstenite::{protocol::Message};
+use tokio_tungstenite::tungstenite::protocol::Message;
 use uuid::Uuid;
 
 // Some terms I use a little loosely here:
@@ -145,11 +142,7 @@ async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::R
                         }
                     }
                 }
-                WsExchangeMsg::IceCandidate {
-                    from_id,
-                    to_id,
-                    ..
-                } => {
+                WsExchangeMsg::IceCandidate { from_id, to_id, .. } => {
                     // basically copy-paste of WsExchangeMsg::Sdp
                     if PEER_UUID_AND_SENDER.get(&from_id).is_none() {
                         log::warn!(
@@ -170,9 +163,7 @@ async fn handle_connection(raw_stream: TcpStream, addr: SocketAddr) -> anyhow::R
                     // and forward the message...
                     match send_to_kv.send(msg).await {
                         Ok(()) => {
-                            log::info!(
-                                "ICE candidate exchanged from {from_id} to {to_id}"
-                            );
+                            log::info!("ICE candidate exchanged from {from_id} to {to_id}");
                         }
                         Err(e) => {
                             log::warn!("Cannot forward message to {to_id}: {e}");
