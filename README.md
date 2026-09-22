@@ -99,4 +99,4 @@ RUST_LOG=peer=info cargo run --bin peer
 ### Saving the stream
 > [!WARN]
 > With how I set it up, it'll only work when there are only 2 peers. So, it's currently commented out (in `peer/src/handle.rs`)
-- As this is currently disabled, but the save files are still generated, you might find a bunch of empty, very long-named `.h264` files.
+- Currently disabled.
