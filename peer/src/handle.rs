@@ -90,21 +90,21 @@ impl PeerConnectionEventHandler for WebRtcHandler {
         );
 
         if kind == RtpCodecKind::Video {
-            let mut video_save: H26xWriter<BufWriter<File>> = H26xWriter::new(
-                BufWriter::new(
-                    OpenOptions::new()
-                        .create(true)
-                        .truncate(true)
-                        .write(true)
-                        .open(format!(
-                            "save-video-{}-{}.h264",
-                            *SELF_UUID.get().unwrap(),
-                            self.other_peer_id
-                        ))
-                        .expect("cannot open video file to save"),
-                ),
-                false,
-            );
+            // let mut video_save: H26xWriter<BufWriter<File>> = H26xWriter::new(
+            //     BufWriter::new(
+            //         OpenOptions::new()
+            //             .create(true)
+            //             .truncate(true)
+            //             .write(true)
+            //             .open(format!(
+            //                 "save-video-{}-{}.h264",
+            //                 *SELF_UUID.get().unwrap(),
+            //                 self.other_peer_id
+            //             ))
+            //             .expect("cannot open video file to save"),
+            //     ),
+            //     false,
+            // );
             log::info!("Saving video");
             let pli_track = track.clone();
             // Send PLI every 3 seconds for video tracks to request keyframes
@@ -127,43 +127,43 @@ impl PeerConnectionEventHandler for WebRtcHandler {
             }));
 
             tokio::spawn(async move {
-                while let Some(evt) = track.poll().await {
-                    if let TrackRemoteEvent::OnRtpPacket(packet) = evt
-                        && let Err(err) = video_save.write_rtp(&packet)
-                    {
-                        println!("video write_rtp error: {err}");
-                        break;
-                    }
+                while let Some(_) = track.poll().await {
+                    // if let TrackRemoteEvent::OnRtpPacket(packet) = evt
+                    //     && let Err(err) = video_save.write_rtp(&packet)
+                    // {
+                    //     println!("video write_rtp error: {err}");
+                    //     break;
+                    // }
                 }
             });
         } else {
             // audio
-            let mut audio_save: OggWriter<BufWriter<File>> = OggWriter::new(
-                BufWriter::new(
-                    OpenOptions::new()
-                        .create(true)
-                        .truncate(true)
-                        .write(true)
-                        .open(format!(
-                            "save-audio-{}-{}.ogg",
-                            *SELF_UUID.get().unwrap(),
-                            self.other_peer_id
-                        ))
-                        .expect("cannot open audio file to save"),
-                ),
-                48_000,
-                2,
-            )
-            .expect("cannot open OPUS writer");
+            // let mut audio_save: OggWriter<BufWriter<File>> = OggWriter::new(
+            //     BufWriter::new(
+            //         OpenOptions::new()
+            //             .create(true)
+            //             .truncate(true)
+            //             .write(true)
+            //             .open(format!(
+            //                 "save-audio-{}-{}.ogg",
+            //                 *SELF_UUID.get().unwrap(),
+            //                 self.other_peer_id
+            //             ))
+            //             .expect("cannot open audio file to save"),
+            //     ),
+            //     48_000,
+            //     2,
+            // )
+            // .expect("cannot open OPUS writer");
             log::info!("Saving audio");
             tokio::spawn(async move {
-                while let Some(evt) = track.poll().await {
-                    if let TrackRemoteEvent::OnRtpPacket(packet) = evt
-                        && let Err(err) = audio_save.write_rtp(&packet)
-                    {
-                        println!("audio write_rtp error: {err}");
-                        break;
-                    }
+                while let Some(_) = track.poll().await {
+                    // if let TrackRemoteEvent::OnRtpPacket(packet) = evt
+                    //     && let Err(err) = audio_save.write_rtp(&packet)
+                    // {
+                    //     println!("audio write_rtp error: {err}");
+                    //     break;
+                    // }
                 }
             });
         }
