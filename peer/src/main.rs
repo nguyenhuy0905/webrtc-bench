@@ -17,25 +17,25 @@ use anyhow::Context;
 use clap::Parser;
 use common::WsExchangeMsg;
 use futures_util::{
-    SinkExt,
     stream::{SplitSink, SplitStream, StreamExt},
+    SinkExt,
 };
 use globals::{
-    AUDIO_CODEC, AUDIO_FILE_NAME, AUDIO_SSRC, CSV_AUDIO_FILE, CSV_VIDEO_FILE, CTRLC_BROADCAST,
-    H26X_FRAME_DURATION, OGG_FRAME_DURATION, OTHER_PEERS, PEER_CONF, PeerInfo, RUNTIME, SELF_UUID,
-    VIDEO_CODEC, VIDEO_FILE_NAME, VIDEO_SSRC,
+    PeerInfo, AUDIO_CODEC, AUDIO_FILE_NAME, AUDIO_SSRC, CSV_AUDIO_FILE, CSV_VIDEO_FILE,
+    CTRLC_BROADCAST, H26X_FRAME_DURATION, OGG_FRAME_DURATION, OTHER_PEERS, PEER_CONF, RUNTIME,
+    SELF_UUID, VIDEO_CODEC, VIDEO_FILE_NAME, VIDEO_SSRC,
 };
 // use rand::distr::Distribution as _;
 use rtc::{
-    interceptor::{Interceptor, Packet, StreamInfo, TaggedPacket, interceptor},
+    interceptor::{interceptor, Interceptor, Packet, StreamInfo, TaggedPacket},
     media::{
-        Sample,
         io::{h26x_reader::sample_reader::H26xSampleReader, ogg_reader::OggReader},
+        Sample,
     },
     rtcp::receiver_report::ReceiverReport,
     rtp_transceiver::{
-        PayloadType,
         rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind},
+        PayloadType,
     },
     sansio,
     shared::{error::Error, time::SystemInstant},
@@ -49,23 +49,23 @@ use std::{
 };
 use tokio::{
     net::TcpStream,
-    sync::{Mutex, broadcast, mpsc},
+    sync::{broadcast, mpsc, Mutex},
 };
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream,
     tungstenite::{error::Error as TungsteniteError, protocol::Message},
+    MaybeTlsStream, WebSocketStream,
 };
 use uuid::Uuid;
 #[allow(unused)]
 use webrtc::{
     media_stream::{
+        track_local::{static_sample::TrackLocalStaticSample, TrackLocal as _, TrackLocalEvent},
         MediaStreamTrack, Track,
-        track_local::{TrackLocal as _, TrackLocalEvent, static_sample::TrackLocalStaticSample},
     },
     peer_connection::{
-        MediaEngine, PeerConnection, PeerConnectionBuilder, RTCConfigurationBuilder, RTCIceServer,
-        RTCSdpType, RTCSessionDescription, RTCSignalingState, Registry,
-        register_default_interceptors,
+        register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
+        RTCConfigurationBuilder, RTCIceServer, RTCSdpType, RTCSessionDescription,
+        RTCSignalingState, Registry,
     },
 };
 
@@ -149,7 +149,7 @@ async fn main_async() -> anyhow::Result<()> {
         csv_video_file
             .lock()
             .await
-            .write(b"PeerId,DelayMs\n")
+            .write(b"PeerId,DelayMs,FractionLost,TotalLost\n")
             .context("Cannot write CSV file header")?;
         CSV_VIDEO_FILE
             .set(csv_video_file)
@@ -463,7 +463,7 @@ async fn stream_video(
     let ssrc = *video_track.ssrcs().await.first().unwrap();
     // the bool means it's not H265
     let mut video_reader = H26xSampleReader::new(reader, 1024 * 1024, false);
-    let mut tick = tokio::time::interval(OGG_FRAME_DURATION);
+    let mut tick = tokio::time::interval(H26X_FRAME_DURATION);
 
     // get the RTCP RR
     let vtr = video_track.clone();
@@ -488,16 +488,14 @@ async fn stream_video(
                 // RTT in milliseconds
                 let rtt_float: f32 =
                     ((rtt >> 16) as f32 + ((rtt & 0x0000_FFFF) as f32) / 65_536f32) * 1_000f32;
+                let frac_lost: f32 = (report.fraction_lost as f32) / 256.0f32;
+                let jitter: f32 = (report.jitter as f32) / 90_000.0f32;
 
                 // Since this is a BufWriter, it will take a while before the data is actually
                 // written.
-                if let Err(e) = CSV_VIDEO_FILE
-                    .get()
-                    .unwrap()
-                    .lock()
-                    .await
-                    .write(format!("{peer_id},{rtt_float:.3}\n").as_bytes())
-                {
+                if let Err(e) = CSV_VIDEO_FILE.get().unwrap().lock().await.write(
+                    format!("{peer_id},{rtt_float:.3},{frac_lost:.3},{jitter:.3}\n").as_bytes(),
+                ) {
                     log::warn!("Cannot write a sample from {peer_id}: {e}");
                 };
             }
@@ -545,7 +543,7 @@ async fn stream_audio(
     let ssrc = *audio_track.ssrcs().await.first().unwrap();
     // The bool means it does checksum
     let (mut audio_reader, _) = OggReader::new(reader, true).context("Cannot read OGG file")?;
-    let mut tick = tokio::time::interval(H26X_FRAME_DURATION);
+    let mut tick = tokio::time::interval(OGG_FRAME_DURATION);
 
     // get the RTCP RR
     let atr = audio_track.clone();
@@ -570,16 +568,14 @@ async fn stream_audio(
                 // RTT in milliseconds
                 let rtt_float: f32 =
                     ((rtt >> 16) as f32 + ((rtt & 0x0000_FFFF) as f32) / 65_536f32) * 1_000f32;
+                let frac_lost: f32 = (report.fraction_lost as f32) / 256.0f32;
+                let jitter: f32 = (report.jitter as f32) / 48_000.0f32;
 
                 // Since this is a BufWriter, it will take a while before the data is actually
                 // written.
-                if let Err(e) = CSV_AUDIO_FILE
-                    .get()
-                    .unwrap()
-                    .lock()
-                    .await
-                    .write(format!("{peer_id},{rtt_float:.3}\n").as_bytes())
-                {
+                if let Err(e) = CSV_AUDIO_FILE.get().unwrap().lock().await.write(
+                    format!("{peer_id},{rtt_float:.3},{frac_lost:.3},{jitter:.3}\n").as_bytes(),
+                ) {
                     log::warn!("Cannot write a sample from {peer_id}: {e}");
                 };
             }
