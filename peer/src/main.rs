@@ -169,7 +169,7 @@ async fn main_async() -> anyhow::Result<()> {
         csv_audio_file
             .lock()
             .await
-            .write(b"PeerId,DelayMs\n")
+            .write(b"PeerId,DelayMs,FractionLost,TotalLost\n")
             .context("Cannot write CSV file header")?;
         CSV_AUDIO_FILE
             .set(csv_audio_file)
