@@ -149,7 +149,7 @@ async fn main_async() -> anyhow::Result<()> {
         csv_video_file
             .lock()
             .await
-            .write(b"PeerId,DelayMs,FractionLost,TotalLost\n")
+            .write(b"PeerId,DelayMs,FractionLost,Jitter,TotalLost\n")
             .context("Cannot write CSV file header")?;
         CSV_VIDEO_FILE
             .set(csv_video_file)
@@ -169,7 +169,7 @@ async fn main_async() -> anyhow::Result<()> {
         csv_audio_file
             .lock()
             .await
-            .write(b"PeerId,DelayMs,FractionLost,TotalLost\n")
+            .write(b"PeerId,DelayMs,FractionLost,Jitter,TotalLost\n")
             .context("Cannot write CSV file header")?;
         CSV_AUDIO_FILE
             .set(csv_audio_file)
@@ -494,7 +494,11 @@ async fn stream_video(
                 // Since this is a BufWriter, it will take a while before the data is actually
                 // written.
                 if let Err(e) = CSV_VIDEO_FILE.get().unwrap().lock().await.write(
-                    format!("{peer_id},{rtt_float:.3},{frac_lost:.3},{jitter:.3}\n").as_bytes(),
+                    format!(
+                        "{peer_id},{rtt_float:.3},{frac_lost:.3},{jitter:.3},{total_lost}\n",
+                        total_lost = report.total_lost
+                    )
+                    .as_bytes(),
                 ) {
                     log::warn!("Cannot write a sample from {peer_id}: {e}");
                 };
@@ -574,7 +578,11 @@ async fn stream_audio(
                 // Since this is a BufWriter, it will take a while before the data is actually
                 // written.
                 if let Err(e) = CSV_AUDIO_FILE.get().unwrap().lock().await.write(
-                    format!("{peer_id},{rtt_float:.3},{frac_lost:.3},{jitter:.3}\n").as_bytes(),
+                    format!(
+                        "{peer_id},{rtt_float:.5},{frac_lost:.5},{jitter:.5},{total_lost}\n",
+                        total_lost = report.total_lost
+                    )
+                    .as_bytes(),
                 ) {
                     log::warn!("Cannot write a sample from {peer_id}: {e}");
                 };
