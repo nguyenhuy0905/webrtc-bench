@@ -76,24 +76,15 @@ pub static PEER_CONF: OnceLock<RTCConfiguration> = OnceLock::new();
 /// ~24fps
 pub static H26X_FRAME_DURATION: Duration = Duration::from_millis(41);
 pub static OGG_FRAME_DURATION: Duration = Duration::from_millis(20);
-/// I love global states
-pub static VIDEO_FILE_NAME: OnceLock<String> = OnceLock::new();
-/// I love global states
-pub static AUDIO_FILE_NAME: OnceLock<String> = OnceLock::new();
 // NOTE we don't handle SSRC collision for now.
 pub static VIDEO_SSRC: LazyLock<u32> = LazyLock::new(rand::random);
 // NOTE we don't handle SSRC collision for now.
 pub static AUDIO_SSRC: LazyLock<u32> = LazyLock::new(rand::random);
-// // I really love global states
-// pub static VIDEO_SAVE_FILE: OnceLock<Mutex<H26xWriter<BufWriter<File>>>> = OnceLock::new();
-// // I really love global states
-// pub static AUDIO_SAVE_FILE: OnceLock<Mutex<OggWriter<BufWriter<File>>>> = OnceLock::new();
-// I really really love global states
 /// CSV file:
-/// peer-uuid,rtt
+/// peer-uuid,rtt,fraction-lost,jitter,total-lost
 pub static CSV_VIDEO_FILE: OnceLock<Mutex<BufWriter<File>>> = OnceLock::new();
 /// CSV file:
-/// peer-uuid,rtt
+/// peer-uuid,rtt,fraction-lost,jitter,total-lost
 pub static CSV_AUDIO_FILE: OnceLock<Mutex<BufWriter<File>>> = OnceLock::new();
 /// <C-c> signal.
 pub static CTRLC_BROADCAST: LazyLock<broadcast::Sender<()>> = LazyLock::new(|| {

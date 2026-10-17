@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 webrtc.workspace = true
+bytes.workspace = true
 rtc.workspace = true
 tokio.workspace = true
 log.workspace = true

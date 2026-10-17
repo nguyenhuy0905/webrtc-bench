@@ -14,6 +14,7 @@ mod globals;
 mod handle;
 
 use anyhow::Context;
+use bytes::BytesMut;
 use clap::Parser;
 use common::WsExchangeMsg;
 use futures_util::{
@@ -21,15 +22,18 @@ use futures_util::{
     SinkExt,
 };
 use globals::{
-    PeerInfo, AUDIO_CODEC, AUDIO_FILE_NAME, AUDIO_SSRC, CSV_AUDIO_FILE, CSV_VIDEO_FILE,
-    CTRLC_BROADCAST, H26X_FRAME_DURATION, OGG_FRAME_DURATION, OTHER_PEERS, PEER_CONF, RUNTIME,
-    SELF_UUID, VIDEO_CODEC, VIDEO_FILE_NAME, VIDEO_SSRC,
+    PeerInfo, AUDIO_CODEC, AUDIO_SSRC, CSV_AUDIO_FILE, CSV_VIDEO_FILE, CTRLC_BROADCAST,
+    H26X_FRAME_DURATION, OGG_FRAME_DURATION, OTHER_PEERS, PEER_CONF, RUNTIME, SELF_UUID,
+    VIDEO_CODEC, VIDEO_SSRC,
 };
 // use rand::distr::Distribution as _;
 use rtc::{
     interceptor::{interceptor, Interceptor, Packet, StreamInfo, TaggedPacket},
     media::{
-        io::{h26x_reader::sample_reader::H26xSampleReader, ogg_reader::OggReader},
+        io::{
+            h26x_reader::sample_reader::{H26xSample, H26xSampleReader},
+            ogg_reader::{OggPageHeader, OggReader},
+        },
         Sample,
     },
     rtcp::receiver_report::ReceiverReport,
@@ -93,11 +97,7 @@ fn main() -> anyhow::Result<()> {
 async fn main_async() -> anyhow::Result<()> {
     env_logger::init();
     let args = Opts::parse();
-    // log::info!("Saving video to {}", args.video_save_to_file);
 
-    // initialize some stuff
-    globals::VIDEO_FILE_NAME.get_or_init(|| args.video_file);
-    globals::AUDIO_FILE_NAME.get_or_init(|| args.audio_file);
     PEER_CONF
         .set(
             RTCConfigurationBuilder::new()
@@ -179,7 +179,61 @@ async fn main_async() -> anyhow::Result<()> {
         anyhow::bail!("WsExchangeMsg didn't return JoinPeerId");
     }
 
-    handle_signal(read_stream, write_stream).await?;
+    // open a broadcast to stream video and audio.
+    // NOTE: The stream starts right away.
+    let video_file = File::open(args.video_file).context("Cannot open H264 file")?;
+    let audio_file = File::open(args.audio_file).context("Cannot open OGG file")?;
+
+    let (video_broadcast_tx, _) = broadcast::channel::<H26xSample>(16);
+    let (audio_broadcast_tx, _) = broadcast::channel::<(BytesMut, OggPageHeader)>(16);
+
+    let vbt = video_broadcast_tx.clone();
+    // send video
+    tokio::spawn(async move {
+        let reader = BufReader::new(video_file);
+        let mut video_reader = H26xSampleReader::new(reader, 1024 * 1024, false);
+        let mut tick = tokio::time::interval(H26X_FRAME_DURATION);
+
+        loop {
+            let sample = match video_reader.next_sample() {
+                Ok(sample) => sample,
+                Err(e) => {
+                    log::info!("All video frames parsed and sent: {e}");
+                    break;
+                }
+            };
+            let timed_sample = sample.timed;
+            // SAFETY: currently ignoring error return
+            let _ = vbt.send(sample);
+            if timed_sample {
+                tick.tick().await;
+            }
+        }
+    });
+
+    let abt = audio_broadcast_tx.clone();
+    // send audio
+    tokio::spawn(async move {
+        let reader = BufReader::new(audio_file);
+        // The bool means it does checksum
+        let (mut audio_reader, _) = OggReader::new(reader, true).expect("Cannot read OGG file");
+        let mut tick = tokio::time::interval(OGG_FRAME_DURATION);
+
+        // send da audio
+        while let Ok((page_data, page_header)) = audio_reader.parse_next_page() {
+            // SAFETY: currently ignoring error return
+            let _ = abt.send((page_data, page_header));
+            let _ = tick.tick().await;
+        }
+    });
+
+    handle_signal(
+        read_stream,
+        write_stream,
+        video_broadcast_tx,
+        audio_broadcast_tx,
+    )
+    .await?;
 
     Ok(())
 }
@@ -188,6 +242,8 @@ async fn main_async() -> anyhow::Result<()> {
 async fn handle_signal(
     read_stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     mut write_stream: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+    video_broadcast_tx: broadcast::Sender<H26xSample>,
+    audio_broadcast_tx: broadcast::Sender<(BytesMut, OggPageHeader)>,
 ) -> anyhow::Result<()> {
     let (outgoing, mut incoming) = mpsc::channel::<WsExchangeMsg>(4);
 
@@ -208,7 +264,7 @@ async fn handle_signal(
         ctrlc_rx.recv().await;
     };
     tokio::select! {
-        _ = signal_loop(read_stream, outgoing.clone()) => {
+        _ = signal_loop(read_stream, outgoing.clone(), video_broadcast_tx, audio_broadcast_tx) => {
             log::info!("Signaling socket closed");
         },
         _ = wait_for_ctrlc => {
@@ -241,6 +297,8 @@ fn convert_message(msg: Result<Message, TungsteniteError>) -> anyhow::Result<WsE
 async fn signal_loop(
     mut read_stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     outgoing: mpsc::Sender<WsExchangeMsg>,
+    video_broadcast_tx: broadcast::Sender<H26xSample>,
+    audio_broadcast_tx: broadcast::Sender<(BytesMut, OggPageHeader)>,
 ) {
     while let Some(msg) = read_stream.next().await {
         let msg = match convert_message(msg) {
@@ -254,7 +312,14 @@ async fn signal_loop(
 
         // NOTE: it's normal to see ICE handling error message from one peer, due to remote
         // connection not being added yet.
-        if let Err(e) = handle_message(msg, outgoing.clone()).await {
+        if let Err(e) = handle_message(
+            msg,
+            outgoing.clone(),
+            video_broadcast_tx.clone(),
+            audio_broadcast_tx.clone(),
+        )
+        .await
+        {
             log::warn!("Error handling message: {e:?}");
         }
     }
@@ -264,6 +329,8 @@ async fn signal_loop(
 async fn handle_message(
     msg: WsExchangeMsg,
     outgoing: mpsc::Sender<WsExchangeMsg>,
+    video_broadcast_tx: broadcast::Sender<H26xSample>,
+    audio_broadcast_tx: broadcast::Sender<(BytesMut, OggPageHeader)>,
 ) -> anyhow::Result<()> {
     match msg {
         WsExchangeMsg::NewPeer(peer_id) => {
@@ -272,9 +339,14 @@ async fn handle_message(
                     .await
                     .with_context(|| format!("Cannot add new peer {peer_id}"))?,
             );
-            let start_stream_tx = add_media_to_connection(peer_id, new_peer.clone())
-                .await
-                .with_context(|| format!("Cannot add media to {peer_id}"))?;
+            let start_stream_tx = add_media_to_connection(
+                peer_id,
+                new_peer.clone(),
+                video_broadcast_tx,
+                audio_broadcast_tx,
+            )
+            .await
+            .with_context(|| format!("Cannot add media to {peer_id}"))?;
             OTHER_PEERS.insert(peer_id, PeerInfo::new(new_peer.clone(), start_stream_tx));
 
             log::info!("Peer {peer_id} added! TODO send offer to peer");
@@ -331,10 +403,15 @@ async fn handle_message(
                             })
                             .context(CONTEXT)?,
                     );
-                    let start_stream_tx = add_media_to_connection(from_id, other_peer.clone())
-                        .await
-                        .with_context(|| format!("Cannot add media to connection with {from_id}"))
-                        .context(CONTEXT)?;
+                    let start_stream_tx = add_media_to_connection(
+                        from_id,
+                        other_peer.clone(),
+                        video_broadcast_tx,
+                        audio_broadcast_tx,
+                    )
+                    .await
+                    .with_context(|| format!("Cannot add media to connection with {from_id}"))
+                    .context(CONTEXT)?;
                     other_peer
                         .set_remote_description(sdp)
                         .await
@@ -456,14 +533,12 @@ async fn stream_video(
     peer_id: Uuid,
     video_track: Arc<TrackLocalStaticSample>,
     payload_type: PayloadType,
+    video_broadcast_tx: broadcast::Sender<H26xSample>,
 ) -> anyhow::Result<()> {
-    let file = File::open(VIDEO_FILE_NAME.get().unwrap()).context("Cannot open H264 file")?;
-    let reader = BufReader::new(file);
     // really, you must've had SSRC here already
     let ssrc = *video_track.ssrcs().await.first().unwrap();
-    // the bool means it's not H265
-    let mut video_reader = H26xSampleReader::new(reader, 1024 * 1024, false);
     let mut tick = tokio::time::interval(H26X_FRAME_DURATION);
+    let mut video_broadcast_rx = video_broadcast_tx.subscribe();
 
     // get the RTCP RR
     let vtr = video_track.clone();
@@ -495,7 +570,7 @@ async fn stream_video(
                 // written.
                 if let Err(e) = CSV_VIDEO_FILE.get().unwrap().lock().await.write(
                     format!(
-                        "{peer_id},{rtt_float:.3},{frac_lost:.3},{jitter:.3},{total_lost}\n",
+                        "{peer_id},{rtt_float:.5},{frac_lost:.5},{jitter:.5},{total_lost}\n",
                         total_lost = report.total_lost
                     )
                     .as_bytes(),
@@ -508,8 +583,11 @@ async fn stream_video(
 
     // send da video
     loop {
-        let sample = match video_reader.next_sample() {
+        let sample = match video_broadcast_rx.recv().await {
             Ok(sample) => sample,
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                continue;
+            }
             Err(e) => {
                 log::info!("All video frames parsed and sent: {e}");
                 break;
@@ -540,14 +618,12 @@ async fn stream_audio(
     peer_id: Uuid,
     audio_track: Arc<TrackLocalStaticSample>,
     payload_type: PayloadType,
+    audio_broadcast_tx: broadcast::Sender<(BytesMut, OggPageHeader)>,
 ) -> anyhow::Result<()> {
-    let file = File::open(AUDIO_FILE_NAME.get().unwrap()).context("Cannot open OGG file")?;
-    let reader = BufReader::new(file);
     // really, you must've had SSRC here already
     let ssrc = *audio_track.ssrcs().await.first().unwrap();
-    // The bool means it does checksum
-    let (mut audio_reader, _) = OggReader::new(reader, true).context("Cannot read OGG file")?;
     let mut tick = tokio::time::interval(OGG_FRAME_DURATION);
+    let mut audio_broadcast_rx = audio_broadcast_tx.subscribe();
 
     // get the RTCP RR
     let atr = audio_track.clone();
@@ -592,21 +668,31 @@ async fn stream_audio(
 
     let mut last_granule: u64 = 0;
     // send da audio
-    while let Ok((page_data, page_header)) = audio_reader.parse_next_page() {
-        let sample_count = page_header.granule_position - last_granule;
-        last_granule = page_header.granule_position;
-        let sample_duration = Duration::from_millis(sample_count * 1000 / 48000);
+    loop {
+        match audio_broadcast_rx.recv().await {
+            Ok((page_data, page_header)) => {
+                let sample_count = page_header.granule_position - last_granule;
+                last_granule = page_header.granule_position;
+                let sample_duration = Duration::from_millis(sample_count * 1000 / 48000);
 
-        audio_track
-            .sample_writer(ssrc, payload_type)
-            .write_sample(&Sample {
-                data: page_data.freeze(),
-                duration: sample_duration,
-                ..Default::default()
-            })
-            .await?;
+                audio_track
+                    .sample_writer(ssrc, payload_type)
+                    .write_sample(&Sample {
+                        data: page_data.freeze(),
+                        duration: sample_duration,
+                        ..Default::default()
+                    })
+                    .await?;
 
-        let _ = tick.tick().await;
+                let _ = tick.tick().await;
+            },
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                continue;
+            },
+            Err(_) => {
+                break;
+            }
+        }
     }
 
     Ok(())
@@ -616,6 +702,8 @@ async fn stream_audio(
 async fn add_media_to_connection(
     peer_id: Uuid,
     peer_conn: Arc<dyn PeerConnection>,
+    video_broadcast_tx: broadcast::Sender<H26xSample>,
+    audio_broadcast_tx: broadcast::Sender<(BytesMut, OggPageHeader)>,
 ) -> anyhow::Result<broadcast::Sender<()>> {
     let video_track = Arc::new(
         TrackLocalStaticSample::new(MediaStreamTrack::new(
@@ -702,11 +790,9 @@ async fn add_media_to_connection(
     tokio::spawn(async move {
         let mut start_stream_rx = sub.subscribe();
         if let Ok(()) = start_stream_rx.recv().await {
-            log::info!(
-                "Start playing video from {}",
-                VIDEO_FILE_NAME.get().unwrap()
-            );
-            if let Err(e) = stream_video(peer_id, video_track, video_payload_type).await {
+            if let Err(e) =
+                stream_video(peer_id, video_track, video_payload_type, video_broadcast_tx).await
+            {
                 log::error!("Cannot stream video: {e:?}");
             }
         }
@@ -715,11 +801,9 @@ async fn add_media_to_connection(
     // and a stream sending audio
     tokio::spawn(async move {
         if let Ok(()) = start_stream_rx.recv().await {
-            log::info!(
-                "Start playing audio from {}",
-                AUDIO_FILE_NAME.get().unwrap()
-            );
-            if let Err(e) = stream_audio(peer_id, audio_track, audio_payload_type).await {
+            if let Err(e) =
+                stream_audio(peer_id, audio_track, audio_payload_type, audio_broadcast_tx).await
+            {
                 log::error!("Cannot stream audio: {e:?}");
             }
         }
